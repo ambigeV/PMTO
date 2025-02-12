@@ -352,8 +352,7 @@ def optimization_loop_test(n_runs=1, n_iter=5):
     # Plot the contexts
     plot_contexts(contexts)
 
-    # Initialize storage for multiple runs
-    all_runs_data = {}
+    timestamp = "dtlz-2_5_2"
 
     for run in range(n_runs):
         print(f"Starting run {run + 1}/{n_runs}")
@@ -376,7 +375,6 @@ def optimization_loop_test(n_runs=1, n_iter=5):
         Y_init = obj_func.evaluate(X_init)
 
         # Run optimization
-        n_iter = 5
         X_opt, Y_opt = optimizer.optimize(X_init, Y_init, contexts, n_iter=n_iter)
 
         # Store results for this run
@@ -393,37 +391,33 @@ def optimization_loop_test(n_runs=1, n_iter=5):
             else:
                 print(f"Run {run + 1}, Context {i}: No Pareto front found")
 
-        all_runs_data[f'run_{run}'] = run_data
+        # Save individual run data
+        save_path = f'result/CMOBO_optimization_history_{timestamp}_run_{run}.pth'
+        torch.save(run_data, save_path)
+        print(f"Run {run + 1} data saved to {save_path}")
 
-    # Save all runs data
-    timestamp = "dtlz-2_5_2"
-    save_path = f'result/CMOBO_optimization_history_{timestamp}.pth'
-    torch.save(all_runs_data, save_path)
-    print(f"All runs data saved to {save_path}")
+        # Plot hypervolume history for this run
+        fig, axes = plt.subplots(4, 4, figsize=(20, 20))
+        fig.suptitle(f'Hypervolume History for Each Context (Run {run + 1})', fontsize=16)
 
-    # Plot hypervolume history for all runs
-    fig, axes = plt.subplots(4, 4, figsize=(20, 20))
-    fig.suptitle('Hypervolume History for Each Context (All Runs)', fontsize=16)
+        for i, context in enumerate(contexts):
+            row = i // 4
+            col = i % 4
+            ax = axes[row, col]
 
-    for i, context in enumerate(contexts):
-        row = i // 4
-        col = i % 4
-        ax = axes[row, col]
-
-        context_key = tuple(context.numpy())
-        for run in range(n_runs):
-            if context_key in all_runs_data[f'run_{run}']:
-                hv_history = all_runs_data[f'run_{run}'][context_key]['hv_history']
+            context_key = tuple(context.numpy())
+            if context_key in run_data:
+                hv_history = run_data[context_key]['hv_history']
                 ax.plot(range(len(hv_history)), hv_history, label=f'Run {run + 1}')
 
-        ax.set_title(f'Context {i}')
-        ax.set_xlabel('Iteration')
-        ax.set_ylabel('Hypervolume')
-        ax.legend()
+            ax.set_title(f'Context {i}')
+            ax.set_xlabel('Iteration')
+            ax.set_ylabel('Hypervolume')
+            ax.legend()
 
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    plt.savefig(f'result/CMOBO_hypervolume_history_grid_{timestamp}.png')
-    plt.close()
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+        plt.savefig(f'result/CMOBO_hypervolume_history_grid_{timestamp}_run_{run}.png')
+        plt.close()
 
 
 def run_mobo_test(n_runs=1, n_iter=5):
@@ -439,8 +433,7 @@ def run_mobo_test(n_runs=1, n_iter=5):
     else:
         contexts = generate_and_save_contexts(n_contexts, obj_func.context_dim, contexts_file)
 
-    # Initialize storage for results
-    all_runs_data = {}
+    timestamp = "dtlz-2_5_2"
 
     for run in range(n_runs):
         print(f"Starting run {run + 1}/{n_runs}")
@@ -480,36 +473,32 @@ def run_mobo_test(n_runs=1, n_iter=5):
                 'hv_history': mobo.hv_history
             }
 
-        all_runs_data[f'run_{run}'] = run_data
+        # Save individual run data
+        save_path = f'result/MOBO_optimization_history_{timestamp}_run_{run}.pth'
+        torch.save(run_data, save_path)
+        print(f"Run {run} data saved to {save_path}")
 
-    # Save all runs data
-    timestamp = "dtlz-2_5_2"
-    save_path = f'result/MOBO_optimization_history_{timestamp}.pth'
-    torch.save(all_runs_data, save_path)
-    print(f"All runs data saved to {save_path}")
+        # Plot results for this run
+        fig, axes = plt.subplots(4, 4, figsize=(20, 20))
+        fig.suptitle(f'MOBO Hypervolume History for Each Context (Run {run + 1})', fontsize=16)
 
-    # Plot results
-    fig, axes = plt.subplots(4, 4, figsize=(20, 20))
-    fig.suptitle('MOBO Hypervolume History for Each Context', fontsize=16)
+        for context_idx, context in enumerate(contexts):
+            row = context_idx // 4
+            col = context_idx % 4
+            ax = axes[row, col]
 
-    for context_idx, context in enumerate(contexts):
-        row = context_idx // 4
-        col = context_idx % 4
-        ax = axes[row, col]
-
-        context_key = tuple(context.numpy())
-        for run in range(n_runs):
-            hv_history = all_runs_data[f'run_{run}'][context_key]['hv_history']
+            context_key = tuple(context.numpy())
+            hv_history = run_data[context_key]['hv_history']
             ax.plot(range(len(hv_history)), hv_history, label=f'Run {run + 1}')
 
-        ax.set_title(f'Context {context_idx + 1}')
-        ax.set_xlabel('Iteration')
-        ax.set_ylabel('Hypervolume')
-        ax.legend()
+            ax.set_title(f'Context {context_idx + 1}')
+            ax.set_xlabel('Iteration')
+            ax.set_ylabel('Hypervolume')
+            ax.legend()
 
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    plt.savefig(f'result/MOBO_hypervolume_history_grid_{timestamp}.png')
-    plt.close()
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+        plt.savefig(f'result/MOBO_hypervolume_history_grid_{timestamp}_run_{run}.png')
+        plt.close()
 
 
 if __name__ == "__main__":
@@ -519,7 +508,7 @@ if __name__ == "__main__":
 
     # Run tests
     optimization_loop_test()
-    # run_mobo_test()
+    run_mobo_test()
     # random_test_obj()
     # context_influence_test_grid()
     # random_test_boundary()
