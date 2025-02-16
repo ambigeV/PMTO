@@ -7,6 +7,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy.stats import qmc
 import os
+import argparse
+
 
 # Test Case for GP-SOO
 def test_bo():
@@ -24,6 +26,24 @@ def test_bo():
                               optimizer_type="adam")
 
     X_final, y_final, best_y = bo.optimize(X_train, y_train, n_iter=100, beta=1.0)
+
+
+def parse_arguments():
+    parser = argparse.ArgumentParser(description='Run DTLZ optimization experiments')
+    parser.add_argument('--problem', type=str, default='dtlz2',
+                       choices=['dtlz1', 'dtlz2', 'dtlz3', 'dtlz4', 'dtlz5', 'dtlz6', 'dtlz7'],
+                       help='DTLZ problem to optimize (default: dtlz2)')
+    parser.add_argument('--n_runs', type=int, default=1,
+                       help='Number of optimization runs (default: 1)')
+    parser.add_argument('--n_iter', type=int, default=5,
+                       help='Number of iterations per run (default: 5)')
+    parser.add_argument('--n_objectives', type=int, default=2,
+                       help='Number of objectives (default: 2)')
+    parser.add_argument('--n_variables', type=int, default=5,
+                       help='Number of variables (default: 5)')
+    parser.add_argument('--beta', type=float, default=1.0,
+                        help='Number of controlling param beta (default: 1.0)')
+    return parser.parse_args()
 
 
 def test_multiobjective_functions():
@@ -260,7 +280,7 @@ def random_test_boundary():
 
 
 def context_influence_test_grid():
-    obj_func = ContextualMultiObjectiveFunction(func_name='dtlz2', n_objectives=2, n_variables=5)
+    obj_func = ContextualMultiObjectiveFunction(func_name='dtlz3', n_objectives=2, n_variables=5)
     x_fixed = torch.rand(1, obj_func.input_dim)
 
     # Create a grid of contexts
@@ -336,9 +356,11 @@ def plot_contexts(contexts):
         print("Cannot visualize contexts with more than 3 dimensions")
 
 
-def optimization_loop_test(n_runs=1, n_iter=5):
+def optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2, n_variables=5, temp_beta=1.0):
     # Initialize the objective function
-    obj_func = ContextualMultiObjectiveFunction(func_name='dtlz2', n_objectives=2, n_variables=5)
+    obj_func = ContextualMultiObjectiveFunction(func_name=problem_name,
+                                                n_objectives=n_objectives,
+                                                n_variables=n_variables)
 
     # Set up fixed contexts using LHS
     n_contexts = 16
@@ -352,7 +374,10 @@ def optimization_loop_test(n_runs=1, n_iter=5):
     # Plot the contexts
     plot_contexts(contexts)
 
-    timestamp = "dtlz-2_5_2"
+    timestamp = "{}_{}_{}_{:.2f}_test".format(problem_name,
+                                              n_variables,
+                                              n_objectives,
+                                              temp_beta)
 
     for run in range(n_runs):
         print(f"Starting run {run + 1}/{n_runs}")
@@ -420,9 +445,9 @@ def optimization_loop_test(n_runs=1, n_iter=5):
         plt.close()
 
 
-def run_mobo_test(n_runs=1, n_iter=5):
+def run_mobo_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2, n_variables=5, temp_beta=1.0):
     # Initialize the objective function
-    obj_func = ContextualMultiObjectiveFunction(func_name='dtlz2', n_objectives=2, n_variables=5)
+    obj_func = ContextualMultiObjectiveFunction(func_name=problem_name, n_objectives=2, n_variables=5)
 
     # Set up fixed contexts using LHS
     n_contexts = 16
@@ -433,7 +458,10 @@ def run_mobo_test(n_runs=1, n_iter=5):
     else:
         contexts = generate_and_save_contexts(n_contexts, obj_func.context_dim, contexts_file)
 
-    timestamp = "dtlz-2_5_2"
+    timestamp = "{}_{}_{}_{:.2f}_test".format(problem_name,
+                                              n_variables,
+                                              n_objectives,
+                                              temp_beta)
 
     for run in range(n_runs):
         print(f"Starting run {run + 1}/{n_runs}")
@@ -501,14 +529,45 @@ def run_mobo_test(n_runs=1, n_iter=5):
         plt.close()
 
 
+def main():
+    args = parse_arguments()
+
+    print(f"Running optimization for {args.problem}")
+    print(f"Configuration:")
+    print(f"- Number of runs: {args.n_runs}")
+    print(f"- Number of iterations: {args.n_iter}")
+    print(f"- Number of objectives: {args.n_objectives}")
+    print(f"- Number of variables: {args.n_variables}")
+    print(f"- Number of control beta: {args.beta}")
+
+    # Run both tests with the specified parameters
+    optimization_loop_test(
+        problem_name=args.problem,
+        n_runs=args.n_runs,
+        n_iter=args.n_iter,
+        n_objectives=args.n_objectives,
+        n_variables=args.n_variables,
+        temp_beta=args.beta,
+    )
+
+    run_mobo_test(
+        problem_name=args.problem,
+        n_runs=args.n_runs,
+        n_iter=args.n_iter,
+        n_objectives=args.n_objectives,
+        n_variables=args.n_variables,
+        temp_beta=args.beta,
+    )
+
+
 if __name__ == "__main__":
     # Set random seed for reproducibility
     torch.manual_seed(42)
     # np.random.seed(42)
-
+    main()
     # Run tests
-    optimization_loop_test()
-    run_mobo_test()
+    # optimization_loop_test()
+    # run_mobo_test()
     # random_test_obj()
     # context_influence_test_grid()
     # random_test_boundary()
