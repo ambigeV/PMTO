@@ -1,11 +1,123 @@
 import torch
 import gpytorch
-from .models import SVGPModel, ExactGPModel
+from .models import SVGPModel, ExactGPModel, ArdGPModel
 from .acquisition import optimize_acquisition, optimize_scalarized_acquisition, \
-    optimize_acquisition_for_context, optimize_scalarized_acquisition_for_context
+    optimize_acquisition_for_context, optimize_scalarized_acquisition_for_context, \
+    ucb_acquisition
 from typing import Callable, Optional, Tuple, List, Dict
 from pymoo.indicators.hv import Hypervolume
 from pymoo.util.nds.non_dominated_sorting import NonDominatedSorting
+# TensorBoard Library
+import matplotlib.pyplot as plt
+from torch.utils.tensorboard import SummaryWriter
+
+
+class GPMonitor:
+    def __init__(self, log_dir=None, dir_name=None):
+        # Create unique run name with timestamp
+        timestamp = dir_name
+        if log_dir is None:
+            log_dir = f'runs/gp_monitoring_{timestamp}'
+        self.writer = SummaryWriter(log_dir)
+
+    def log_kernel_params(self, model, objective, iteration):
+        """Log kernel parameters for both decision and context spaces"""
+        # Log lengthscales
+        decision_lengthscale = model.covar_module.lengthscale.item()
+
+        self.writer.add_scalar('Kernel/decision_lengthscale_{}'.format(objective),
+                               decision_lengthscale, iteration)
+
+
+    def log_predictions(self, model, likelihood, X_sample, iteration, objective_idx):
+        """Log prediction statistics for a sample of points"""
+        model.eval()
+        likelihood.eval()
+        with torch.no_grad(), gpytorch.settings.fast_pred_var():
+            # Get predictions
+            pred = likelihood(model(X_sample))
+            mean = pred.mean
+            std = pred.variance.sqrt()
+
+            # Log statistics
+            self.writer.add_scalar(f'Predictions/mean_obj{objective_idx}',
+                                   mean.mean().item(), iteration)
+            self.writer.add_scalar(f'Predictions/std_obj{objective_idx}',
+                                   std.mean().item(), iteration)
+            self.writer.add_scalar(f'Predictions/max_std_obj{objective_idx}',
+                                   std.max().item(), iteration)
+
+            # Log histograms
+            self.writer.add_histogram(f'Distributions/mean_obj{objective_idx}',
+                                      mean.numpy(), iteration)
+            self.writer.add_histogram(f'Distributions/std_obj{objective_idx}',
+                                      std.numpy(), iteration)
+
+    def log_acquisition_values(self, acq_values, iteration):
+        """Log statistics of acquisition function values"""
+        self.writer.add_scalar('Acquisition/mean', np.mean(acq_values), iteration)
+        self.writer.add_scalar('Acquisition/max', np.max(acq_values), iteration)
+        self.writer.add_histogram('Distributions/acquisition', acq_values, iteration)
+
+    def log_optimization_metrics(self, metrics, iteration):
+        """Log optimization-related metrics including Pareto front"""
+        if 'hypervolume' in metrics:
+            self.writer.add_scalar('Optimization/hypervolume',
+                                   metrics['hypervolume'], iteration)
+
+        if 'pareto_points' in metrics:
+            pareto_points = metrics['pareto_points']
+            # Log number of Pareto points
+            self.writer.add_scalar('Optimization/pareto_points',
+                                   len(pareto_points), iteration)
+
+            # Create scatter plot of Pareto front
+            if isinstance(pareto_points, (np.ndarray, torch.Tensor)):
+                points = pareto_points
+            else:
+                points = np.array(pareto_points)
+
+            # Create figure for Pareto front
+            fig = plt.figure(figsize=(8, 8))
+            plt.scatter(points[:, 0], points[:, 1], c='blue', label='Pareto points')
+            plt.xlabel('Objective 1')
+            plt.ylabel('Objective 2')
+            plt.title(f'Pareto Front at Iteration {iteration}')
+            plt.grid(True)
+            plt.legend()
+
+            # Add figure to tensorboard
+            self.writer.add_figure('Pareto_Front/scatter', fig, iteration)
+            plt.close(fig)
+
+            # Optional: Add animation frames
+            if hasattr(self, 'previous_fronts'):
+                fig = plt.figure(figsize=(8, 8))
+                for prev_iter, prev_points in self.previous_fronts[-5:]:  # Show last 5 fronts
+                    alpha = 0.2 + 0.8 * (prev_iter / iteration)  # Fade older fronts
+                    plt.scatter(prev_points[:, 0], prev_points[:, 1],
+                                alpha=alpha, label=f'Iter {prev_iter}')
+                plt.scatter(points[:, 0], points[:, 1],
+                            c='red', label=f'Current (Iter {iteration})')
+                plt.xlabel('Objective 1')
+                plt.ylabel('Objective 2')
+                plt.title('Pareto Front Evolution')
+                plt.grid(True)
+                plt.legend()
+                self.writer.add_figure('Pareto_Front/evolution', fig, iteration)
+                plt.close(fig)
+
+            # Store current front for animation
+            if not hasattr(self, 'previous_fronts'):
+                self.previous_fronts = []
+            self.previous_fronts.append((iteration, points))
+            # Keep only last 10 fronts to manage memory
+            if len(self.previous_fronts) > 10:
+                self.previous_fronts.pop(0)
+
+    def close(self):
+        """Close the writer"""
+        self.writer.close()
 
 
 class AugmentedTchebycheff:
@@ -238,6 +350,8 @@ class ContextualBayesianOptimization:
         """Build GP model based on specified type."""
         if self.model_type == 'SVGP':
             model = SVGPModel(self.inducing_points, input_dim=self.dim)
+        elif self.model_type == 'ArdGP':
+            model = ArdGPModel(X_train, y_train, self.likelihood)
         else:
             model = ExactGPModel(X_train, y_train, self.likelihood)
         return model
@@ -363,10 +477,12 @@ class MultiObjectiveBayesianOptimization:
             model_type='ExactGP',
             optimizer_type='adam',
             rho=0.05,
+            mobo_id=None
     ):
         self.objective_func = objective_func
         self.input_dim = objective_func.input_dim
         self.output_dim = objective_func.output_dim
+        self.mobo_id = mobo_id
 
         # Initialize reference point if not provided
         if reference_point is None:
@@ -386,6 +502,11 @@ class MultiObjectiveBayesianOptimization:
 
         # Create individual BO instances for each objective dimension
         self.bo_models = []
+        self.monitor = GPMonitor(dir_name="{}_{}_{}_{}_context_{}".format("MOBO",
+                                                                          self.input_dim,
+                                                                          self.output_dim,
+                                                                          model_type,
+                                                                          self.mobo_id))
         for _ in range(self.output_dim):
             # Create a wrapper single-objective function for each output dimension
             single_obj = PseudoObjectiveFunction(
@@ -431,11 +552,33 @@ class MultiObjectiveBayesianOptimization:
         self.hv_history.append(self.current_hv)
 
     @staticmethod
+    def _sample_points(n_points, n_decision_vars, n_context_vars):
+        """Generate a sample of points for monitoring predictions"""
+        total_dims = n_decision_vars + n_context_vars
+        return torch.rand(n_points, total_dims)
+
+    @staticmethod
     def _generate_weight_vector(dim: int) -> torch.Tensor:
         """Generate a random weight vector from a Dirichlet distribution."""
         alpha = torch.ones(dim)  # Symmetric Dirichlet distribution
         weights = torch.distributions.Dirichlet(alpha).sample()
         return weights
+
+    def _compute_acquisition_batch(self, predictions, log_sampled_points, beta, weights):
+        """Combine multiple acquisition values using scalarization"""
+        x_norm = log_sampled_points
+
+        # Get acquisition values for each objective
+        acq_values = []
+        for model in predictions:
+            acq_value = ucb_acquisition(model.model, model.likelihood, x_norm, beta)
+            acq_values.append(torch.tensor(acq_value))
+
+        # Stack and scalarize
+        stacked_acq = torch.stack(acq_values, dim=-1)
+        scalarized = self.scalarization(stacked_acq, weights)
+
+        return scalarized.numpy()  # Negative for minimization
 
     def _evaluate_objectives(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -459,6 +602,8 @@ class MultiObjectiveBayesianOptimization:
         # Y_train = self._evaluate_objectives(X_train)
 
         # best_scalarized = []
+
+        log_sampled_points = self._sample_points(10000, self.input_dim, 0)
 
         for iteration in range(n_iter):
 
@@ -509,6 +654,15 @@ class MultiObjectiveBayesianOptimization:
                 bo_model.model = model
                 predictions.append(bo_model)
 
+                # Log GP model parameters
+                self.monitor.log_kernel_params(model, i+1, iteration)
+                # Log predictions for a sample of points
+                self.monitor.log_predictions(model, bo_model.likelihood, log_sampled_points, iteration, i+1)
+
+            # Log acquisition function values
+            acq_values = self._compute_acquisition_batch(predictions,log_sampled_points, beta, weights)
+            self.monitor.log_acquisition_values(acq_values, iteration)
+
             # Optimize acquisition function using scalarization
             next_x = optimize_scalarized_acquisition(
                 models=predictions,
@@ -516,6 +670,8 @@ class MultiObjectiveBayesianOptimization:
                 weights=weights,
                 input_dim=self.input_dim,
                 beta=beta,
+                x_mean=self.bo_models[0].x_mean,
+                x_std=self.bo_models[0].x_std
             )
 
             # Evaluate new point for all objectives simultaneously
@@ -529,8 +685,17 @@ class MultiObjectiveBayesianOptimization:
             self._update_pareto_front(X_train, Y_train)
             self.model_list = predictions
 
+            # Log optimization metrics
+            metrics = {
+                'hypervolume': self.current_hv,
+                'pareto_points': self.pareto_front
+            }
+            self.monitor.log_optimization_metrics(metrics, iteration)
+
             if iteration % 5 == 0:
                 print(f'Iteration {iteration}/{n_iter}, Best y: {self.current_hv:.3f}')
+
+        self.monitor.close()
 
         return X_train, Y_train
 

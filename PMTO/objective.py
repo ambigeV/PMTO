@@ -250,7 +250,7 @@ class ContextualMultiObjectiveFunction:
         self.output_dim = self.n_objectives
 
         self.nadir_point = {
-            'dtlz1': (120 + 100 * (self.n_variables - 2)) * torch.ones(self.n_objectives),
+            'dtlz1': (160 + 100 * (self.n_variables - 2)) * torch.ones(self.n_objectives),
             'dtlz2': 1.25 ** (self.n_variables - 1) * torch.ones(self.n_objectives) + 0.5,
             'dtlz3': 100 * (self.n_variables + self.n_variables * 1.25) * torch.ones(self.n_objectives),
         }[self.func_name]
@@ -272,7 +272,8 @@ class ContextualMultiObjectiveFunction:
         Get power scaling from second context dimension.
         Maps c[1] from [0,1] to [0.8, 1.0]
         """
-        return 0.8 + 0.2 * c[:, 1]  # Second context dimension controls power
+        # return 0.8 + 0.2 * c[:, 1]  # Second context dimension controls power
+        return 0 * c[:, 1] + 1.0
 
     def g_dtlz1(self, x_m, c):
         """
