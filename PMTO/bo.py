@@ -1,36 +1,76 @@
 import torch
+import numpy as np
 import gpytorch
-from .models import SVGPModel, ExactGPModel, ArdGPModel
+from math import log
+import math
+from .models import SVGPModel, ExactGPModel, ArdGPModel, CustomGPModel
 from .acquisition import optimize_acquisition, optimize_scalarized_acquisition, \
     optimize_acquisition_for_context, optimize_scalarized_acquisition_for_context, \
-    ucb_acquisition
+    ucb_acquisition_group
 from typing import Callable, Optional, Tuple, List, Dict
 from pymoo.indicators.hv import Hypervolume
 from pymoo.util.nds.non_dominated_sorting import NonDominatedSorting
 # TensorBoard Library
 import matplotlib.pyplot as plt
 from torch.utils.tensorboard import SummaryWriter
+# Optimizer
+from .LBFGS import FullBatchLBFGS
 
+IF_PLOT = False
+SCALAR = "HV"
+NOISE = False
+# "AT"
 
 class GPMonitor:
-    def __init__(self, log_dir=None, dir_name=None):
+    def __init__(self, log_dir=None, dir_name=None, if_plot=IF_PLOT):
         # Create unique run name with timestamp
-        timestamp = dir_name
-        if log_dir is None:
-            log_dir = f'runs/gp_monitoring_{timestamp}'
-        self.writer = SummaryWriter(log_dir)
+        self.if_plot = if_plot
+        if self.if_plot:
+            timestamp = dir_name
+            if log_dir is None:
+                # log_dir = f'runs/gp_monitoring_constraint_prior_{timestamp}'
+                self.log_dir = f'dtlz1_runs/gp_monitoring_hv_{timestamp}'
+            self.writer = SummaryWriter(self.log_dir)
+        else:
+            pass
 
     def log_kernel_params(self, model, objective, iteration):
-        """Log kernel parameters for both decision and context spaces"""
-        # Log lengthscales
-        decision_lengthscale = model.covar_module.lengthscale.item()
+        if not self.if_plot:
+            return None
+        else:
+            pass
 
-        self.writer.add_scalar('Kernel/decision_lengthscale_{}'.format(objective),
-                               decision_lengthscale, iteration)
+        if hasattr(model.covar_module.base_kernel, 'get_lengthscales'):
+            lengthscales = model.covar_module.base_kernel.get_lengthscales()
+        else:
+            """Log kernel parameters for both decision and context spaces with ARD support"""
+            # Get lengthscales - for ARD this will be a tensor with multiple values
+            lengthscales = model.covar_module.base_kernel.lengthscale.detach()
 
+        # If it's a single lengthscale (non-ARD)
+        if lengthscales.shape[1] == 1:
+            self.writer.add_scalar(
+                f'Kernel/decision_lengthscale_{objective}',
+                lengthscales.item(),
+                iteration
+            )
+        # If it's ARD kernel with multiple lengthscales
+        else:
+            # Log each dimension's lengthscale separately
+            for dim, ls in enumerate(lengthscales.squeeze()):
+                self.writer.add_scalar(
+                    f'Kernel/decision_lengthscale_{objective}_dim{dim}',
+                    ls.item(),
+                    iteration
+                )
 
-    def log_predictions(self, model, likelihood, X_sample, iteration, objective_idx):
+    def log_predictions(self, model, likelihood, X_sample, Y_true, iteration, objective_idx):
         """Log prediction statistics for a sample of points"""
+        if not self.if_plot:
+            return None
+        else:
+            pass
+
         model.eval()
         likelihood.eval()
         with torch.no_grad(), gpytorch.settings.fast_pred_var():
@@ -39,28 +79,51 @@ class GPMonitor:
             mean = pred.mean
             std = pred.variance.sqrt()
 
+            # Compute prediction errors
+            pred_errors = (mean - Y_true).abs()  # Absolute error
+            rel_errors = pred_errors / (Y_true.abs() + 1e-8)  # Relative error
+
             # Log statistics
-            self.writer.add_scalar(f'Predictions/mean_obj{objective_idx}',
-                                   mean.mean().item(), iteration)
+            # Log error statistics
+            self.writer.add_scalar(f'Prediction_Errors/mean_abs_error_obj{objective_idx}',
+                                   pred_errors.mean().item(), iteration)
+            self.writer.add_scalar(f'Prediction_Errors/max_abs_error_obj{objective_idx}',
+                                   pred_errors.max().item(), iteration)
+            self.writer.add_scalar(f'Prediction_Errors/mean_rel_error_obj{objective_idx}',
+                                   rel_errors.mean().item(), iteration)
             self.writer.add_scalar(f'Predictions/std_obj{objective_idx}',
                                    std.mean().item(), iteration)
             self.writer.add_scalar(f'Predictions/max_std_obj{objective_idx}',
                                    std.max().item(), iteration)
 
-            # Log histograms
-            self.writer.add_histogram(f'Distributions/mean_obj{objective_idx}',
-                                      mean.numpy(), iteration)
+            # Log uncertainty metrics
+            uncertainty_calibration = pred_errors / std  # Should be close to 1 if well-calibrated
+            self.writer.add_scalar(f'Prediction_Errors/uncertainty_calibration_obj{objective_idx}',
+                                   uncertainty_calibration.mean().item(), iteration)
+
+            self.writer.add_histogram(f'Distributions/abs_error_obj{objective_idx}',
+                                      pred_errors.numpy(), iteration)
+            self.writer.add_histogram(f'Distributions/rel_error_obj{objective_idx}',
+                                      rel_errors.numpy(), iteration)
+            self.writer.add_histogram(f'sDistributions/uncertainty_calibration_obj{objective_idx}',
+                                      uncertainty_calibration.numpy(), iteration)
             self.writer.add_histogram(f'Distributions/std_obj{objective_idx}',
                                       std.numpy(), iteration)
 
     def log_acquisition_values(self, acq_values, iteration):
         """Log statistics of acquisition function values"""
+        if not self.if_plot:
+            return None
+
         self.writer.add_scalar('Acquisition/mean', np.mean(acq_values), iteration)
         self.writer.add_scalar('Acquisition/max', np.max(acq_values), iteration)
         self.writer.add_histogram('Distributions/acquisition', acq_values, iteration)
 
     def log_optimization_metrics(self, metrics, iteration):
         """Log optimization-related metrics including Pareto front"""
+        if not self.if_plot:
+            return None
+
         if 'hypervolume' in metrics:
             self.writer.add_scalar('Optimization/hypervolume',
                                    metrics['hypervolume'], iteration)
@@ -116,21 +179,64 @@ class GPMonitor:
                 self.previous_fronts.pop(0)
 
     def close(self):
+        if not self.if_plot:
+            return None
+        else:
+            pass
+
         """Close the writer"""
         self.writer.close()
 
 
+class HypervolumeScalarization:
+    """
+    Hypervolume scalarization for minimization using a nadir point,
+    where the per-coordinate ratio is exponentiated first and then the
+    minimum over objectives is taken.
+
+    Given an objective vector y (to be minimized), a nadir point (an upper bound),
+    and a weight vector, we define the scalarization as:
+
+        s_λ(y) = min_i [ max(0, (nadir_i - y_i) / weights_i) ^ exponent ]
+
+    We then return its negative so that a lower scalarized value corresponds to a better candidate.
+
+    Args:
+        nadir_point (torch.Tensor): The nadir point vector (upper bounds) for each objective.
+        exponent (float): The exponent to apply to each coordinate ratio before minimization.
+    """
+
+    def __init__(self, nadir_point: torch.Tensor, exponent: float = 2.0):
+        self.nadir_point = nadir_point
+        self.exponent = exponent
+
+    def __call__(self, y: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+        # Compute the improvement relative to the nadir point.
+        # Assuming y <= nadir_point element-wise, diff = nadir_point - y.
+        diff = self.nadir_point - y
+        # Compute the per-objective ratio.
+        ratio = diff / (weights + 1e-8)
+        # Ensure non-negativity.
+        ratio = torch.clamp(ratio, min=0.0)
+        # First, raise each element to the specified exponent.
+        exp_ratio = ratio ** self.exponent
+        # Then, take the minimum over the objective dimensions.
+        min_val, _ = torch.min(exp_ratio, dim=-1)
+        # Return the negative so that minimizing the scalarized value corresponds to better (lower) objective values.
+        return -min_val
+
 class AugmentedTchebycheff:
     """Augmented Tchebycheff scalarization"""
 
-    def __init__(self, reference_point: torch.Tensor, rho: float = 0.05):
+    def __init__(self, reference_point: torch.Tensor, rho: float = 0.001):
         self.reference_point = reference_point
         self.rho = rho
 
     def __call__(self, y: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
-        weighted_diff = weights * torch.abs(y - self.reference_point)
+        weighted_diff = weights * (y - self.reference_point)
+        weighted_y = weights * y
         max_term = torch.max(weighted_diff, dim=-1)[0]
-        sum_term = self.rho * torch.sum(weighted_diff, dim=-1)
+        sum_term = self.rho * torch.sum(weighted_y, dim=-1)
         return max_term + sum_term
 
 
@@ -244,9 +350,25 @@ class BayesianOptimization:
             return Y * self.y_std + self.y_mean
         return Y
 
+    def normalize_output(self, Y):
+        """
+        Normalize predictions to the original scale.
+
+        Parameters:
+        - Y: Normalized predictions.
+
+        Returns:
+        - Denormalized Y tensor.
+        """
+        if self.y_mean is not None and self.y_std is not None:
+            return (Y - self.y_mean) / self.y_std
+        return Y
+
     def build_model(self, X_train, y_train):
         if self.model_type == 'SVGP':
             model = SVGPModel(self.inducing_points, input_dim=self.dim)
+        elif self.model_type == 'ArdGP':
+            model = ArdGPModel(X_train, y_train, self.likelihood)
         else:
             model = ExactGPModel(X_train, y_train, self.likelihood)
         return model
@@ -273,15 +395,30 @@ class BayesianOptimization:
             else:
                 mll = gpytorch.mlls.ExactMarginalLogLikelihood(self.likelihood, model)
 
-            for _ in range(self.train_steps):
-                def closure():
+            if self.optimizer_type == 'lbfgs':
+                prev_loss = float('inf')
+                for _ in range(20):
+                    def closure():
+                        optimizer.zero_grad()
+                        output = model(X_train_norm)
+                        loss = -mll(output, y_train_norm)
+                        loss.backward()
+                        return loss
+
+                    curr_loss = optimizer.step(closure)
+                    if abs(prev_loss - curr_loss.item()) < 1e-5:
+                        break
+                    prev_loss = curr_loss.item()
+
+            else:
+                prev_loss = float('inf')
+                for _ in range(self.train_steps):
                     optimizer.zero_grad()
                     output = model(X_train_norm)
                     loss = -mll(output, y_train_norm)
                     loss.backward()
-                    return loss
-
-                optimizer.step(closure if self.optimizer_type == 'lbfgs' else None)
+                    optimizer.step()
+                    prev_loss = loss.item()
 
             next_x = optimize_acquisition(model, likelihood=self.likelihood, beta=beta,
                                           dim=self.dim, x_mean=self.x_mean, x_std=self.x_std)
@@ -318,7 +455,12 @@ class ContextualBayesianOptimization:
         self.model_type = model_type
         self.optimizer_type = optimizer_type.lower()
 
+        self.likelihood_new = gpytorch.likelihoods.GaussianLikelihood(
+            noise_constraint=gpytorch.constraints.GreaterThan(1e-3)
+        )
+
         self.likelihood = gpytorch.likelihoods.GaussianLikelihood()
+
         self.model = None
 
         # Placeholders for normalization parameters
@@ -346,14 +488,38 @@ class ContextualBayesianOptimization:
 
         return X_normalized, Y_normalized
 
-    def build_model(self, X_train: torch.Tensor, y_train: torch.Tensor):
+    def normalize_output(self, Y):
+        """
+        Normalize predictions to the original scale.
+
+        Parameters:
+        - Y: Normalized predictions.
+
+        Returns:
+        - Denormalized Y tensor.
+        """
+        if self.y_mean is not None and self.y_std is not None:
+            return (Y - self.y_mean) / self.y_std
+        return Y
+
+    def build_model(self, X_train: torch.Tensor, y_train: torch.Tensor, if_noise=False):
         """Build GP model based on specified type."""
         if self.model_type == 'SVGP':
             model = SVGPModel(self.inducing_points, input_dim=self.dim)
         elif self.model_type == 'ArdGP':
             model = ArdGPModel(X_train, y_train, self.likelihood)
+        elif self.model_type == 'CustomGP':
+            if if_noise:
+                model = CustomGPModel(X_train, y_train, self.likelihood_new, self.x_dim - self.context_dim, self.context_dim)
+            else:
+                model = CustomGPModel(X_train, y_train, self.likelihood, self.x_dim - self.context_dim, self.context_dim)
         else:
-            model = ExactGPModel(X_train, y_train, self.likelihood)
+            if if_noise:
+                model = ExactGPModel(X_train, y_train, self.likelihood_new)
+            else:
+                model = ExactGPModel(X_train, y_train, self.likelihood)
+
+        self.model = model
         return model
 
     def update_context_best_values(
@@ -410,15 +576,30 @@ class ContextualBayesianOptimization:
                 mll = gpytorch.mlls.ExactMarginalLogLikelihood(self.likelihood, model)
 
             # Train the model
-            for _ in range(self.train_steps):
-                def closure():
+            if self.optimizer_type == 'lbfgs':
+                prev_loss = float('inf')
+                for _ in range(20):
+                    def closure():
+                        optimizer.zero_grad()
+                        output = model(X_train_norm)
+                        loss = -mll(output, y_train_norm)
+                        loss.backward()
+                        return loss
+
+                    curr_loss = optimizer.step(closure)
+                    if abs(prev_loss - curr_loss.item()) < 1e-5:
+                        break
+                    prev_loss = curr_loss.item()
+
+            else:
+                prev_loss = float('inf')
+                for _ in range(self.train_steps):
                     optimizer.zero_grad()
                     output = model(X_train_norm)
                     loss = -mll(output, y_train_norm)
                     loss.backward()
-                    return loss
-
-                optimizer.step(closure if self.optimizer_type == 'lbfgs' else None)
+                    optimizer.step()
+                    prev_loss = loss.item()
 
             # Optimize acquisition for each context
             next_points = []
@@ -454,7 +635,7 @@ class ContextualBayesianOptimization:
             # Update best values per context
             self.update_context_best_values(next_points, next_values, contexts)
 
-            if iteration % 5 == 0:
+            if iteration % 3 == 0:
                 print(f'Iteration {iteration}/{n_iter}')
                 for context in contexts:
                     context_key = tuple(context.numpy())
@@ -473,16 +654,20 @@ class MultiObjectiveBayesianOptimization:
             objective_func,
             reference_point=None,
             inducing_points=None,
-            train_steps=500,
+            train_steps=200,
             model_type='ExactGP',
             optimizer_type='adam',
-            rho=0.05,
+            rho=0.001,
             mobo_id=None
     ):
         self.objective_func = objective_func
         self.input_dim = objective_func.input_dim
         self.output_dim = objective_func.output_dim
         self.mobo_id = mobo_id
+        self.model_type = model_type
+        self.base_beta = None
+        self.beta = None
+        self.rho = rho
 
         # Initialize reference point if not provided
         if reference_point is None:
@@ -493,20 +678,24 @@ class MultiObjectiveBayesianOptimization:
         self.nadir_point = self.objective_func.nadir_point
         self.hv = Hypervolume(ref_point=self.nadir_point.numpy())
         self.current_hv = -1
+        self.current_reference_points = None
+        self.current_nadir_points = None
 
         # Initialize scalarization
-        self.scalarization = AugmentedTchebycheff(
-            reference_point=self.reference_point,
-            rho=rho
-        )
+        if SCALAR == "AT":
+            self.scalarization = AugmentedTchebycheff(
+                reference_point=self.reference_point,
+                rho=rho
+            )
+        else:
+            self.scalarization = HypervolumeScalarization(
+                nadir_point=self.nadir_point,
+                exponent=self.output_dim
+            )
 
         # Create individual BO instances for each objective dimension
         self.bo_models = []
-        self.monitor = GPMonitor(dir_name="{}_{}_{}_{}_context_{}".format("MOBO",
-                                                                          self.input_dim,
-                                                                          self.output_dim,
-                                                                          model_type,
-                                                                          self.mobo_id))
+        self.monitor = None
         for _ in range(self.output_dim):
             # Create a wrapper single-objective function for each output dimension
             single_obj = PseudoObjectiveFunction(
@@ -531,6 +720,21 @@ class MultiObjectiveBayesianOptimization:
         self.pareto_set_history = []
         self.model_list = []
 
+    def _update_and_normalize_reference_points(self, Y_train):
+        self.current_reference_points = torch.min(Y_train, dim=0)[0]
+        self.current_reference_points = self.current_reference_points - 0.1
+        # minimal points with a threshold
+        self.current_nadir_points = torch.max(Y_train, dim=0)[0]
+        self.current_nadir_points = self.current_nadir_points + 0.1 * torch.abs(self.current_nadir_points)
+        # maximum points with a threshold
+
+        # Normalize the nadir points and reference points
+        for ind in range(self.output_dim):
+            self.current_reference_points[ind] = self.bo_models[ind].normalize_output(
+                self.current_reference_points[ind])
+            self.current_nadir_points[ind] = self.bo_models[ind].normalize_output(
+                self.current_nadir_points[ind])
+
     def _update_pareto_front(self, X: torch.Tensor, Y: torch.Tensor, minimize: bool = True):
         """Update Pareto front using pymoo's non-dominated sorting."""
         # Convert to numpy for pymoo
@@ -550,6 +754,9 @@ class MultiObjectiveBayesianOptimization:
         # Calculate hypervolume
         self.current_hv = self.hv.do(self.pareto_front.numpy()) if len(front) > 0 else 0.0
         self.hv_history.append(self.current_hv)
+
+    def _update_beta(self, iteration):
+        self.beta = math.sqrt(self.base_beta * log(1 + 2 * iteration))
 
     @staticmethod
     def _sample_points(n_points, n_decision_vars, n_context_vars):
@@ -571,11 +778,23 @@ class MultiObjectiveBayesianOptimization:
         # Get acquisition values for each objective
         acq_values = []
         for model in predictions:
-            acq_value = ucb_acquisition(model.model, model.likelihood, x_norm, beta)
+            acq_value = ucb_acquisition_group(model.model, model.likelihood, x_norm, beta)
             acq_values.append(torch.tensor(acq_value))
 
         # Stack and scalarize
         stacked_acq = torch.stack(acq_values, dim=-1)
+
+        if SCALAR == "AT":
+            self.scalarization = AugmentedTchebycheff(
+                reference_point=self.current_reference_points,
+                rho=self.rho
+            )
+        else:
+            self.scalarization = HypervolumeScalarization(
+                nadir_point=self.current_nadir_points,
+                exponent=self.output_dim
+            )
+
         scalarized = self.scalarization(stacked_acq, weights)
 
         return scalarized.numpy()  # Negative for minimization
@@ -598,14 +817,25 @@ class MultiObjectiveBayesianOptimization:
             beta: float = 1.0
     ) -> Tuple[torch.Tensor, torch.Tensor]:
 
+        self.base_beta = beta
+        self.monitor = GPMonitor(dir_name="{}_{}_{}_{}_context_{}".format("MOBO",
+                                                            self.input_dim,
+                                                            self.output_dim,
+                                                            self.model_type,
+                                                            self.mobo_id))
         # Initialize Y_train for all objectives [n_initial, output_dim]
         # Y_train = self._evaluate_objectives(X_train)
 
         # best_scalarized = []
 
+        if NOISE:
+            Y_train_noise = Y_train + 0.01 * torch.randn_like(Y_train)
+
         log_sampled_points = self._sample_points(10000, self.input_dim, 0)
+        Y_sampled_points = self._evaluate_objectives(log_sampled_points)
 
         for iteration in range(n_iter):
+            self._update_beta(iteration)
 
             # Generate random weights
             weights = self._generate_weight_vector(dim=self.output_dim)
@@ -613,14 +843,24 @@ class MultiObjectiveBayesianOptimization:
             # Train individual models for each objective dimension
             predictions = []
             for i, bo_model in enumerate(self.bo_models):
-                X_norm, y_norm = bo_model.normalize_data(
-                    X_train.clone(),
-                    Y_train[:, i].clone()
-                )
+                if NOISE:
+                    X_norm, y_norm = bo_model.normalize_data(
+                        X_train.clone(),
+                        Y_train_noise[:, i].clone()
+                    )
+                else:
+                    X_norm, y_norm = bo_model.normalize_data(
+                        X_train.clone(),
+                        Y_train[:, i].clone()
+                    )
 
                 model = bo_model.build_model(X_norm, y_norm)
                 model.train()
                 bo_model.likelihood.train()
+
+                # DEBUG:
+                # print("DEBUG: length scale before training is {}.".
+                #       format(model.covar_module.base_kernel.lengthscale.detach().item()))
 
                 # Training loop (same as before)
                 optimizer = torch.optim.Adam(model.parameters(),
@@ -639,29 +879,70 @@ class MultiObjectiveBayesianOptimization:
                         model
                     )
 
-                for _ in range(bo_model.train_steps):
-                    def closure():
+                if bo_model.optimizer_type == 'lbfgs':
+                    prev_loss = float('inf')
+                    for _ in range(20):
+                        def closure():
+                            optimizer.zero_grad()
+                            output = model(X_norm)
+                            loss = -mll(output, y_norm)
+                            loss.backward()
+                            return loss
+
+                        curr_loss = optimizer.step(closure)
+                else:
+                    prev_loss = float('inf')
+                    for _ in range(bo_model.train_steps):
                         optimizer.zero_grad()
                         output = model(X_norm)
                         loss = -mll(output, y_norm)
                         loss.backward()
-                        return loss
+                        optimizer.step()
+                        prev_loss = loss.item()
+                        # print(prev_loss)
 
-                    optimizer.step(
-                        closure if bo_model.optimizer_type == 'lbfgs' else None
-                    )
+
+                # DEBUG:
+                # print("DEBUG: length scale after training is {}.".
+                #       format(model.covar_module.base_kernel.lengthscale.detach().item()))
 
                 bo_model.model = model
                 predictions.append(bo_model)
 
                 # Log GP model parameters
                 self.monitor.log_kernel_params(model, i+1, iteration)
+                # Compute Norm Points
+                norm_log_sampled_points = (log_sampled_points - self.bo_models[0].x_mean) / self.bo_models[0].x_std
+                Y_norm_points = (Y_sampled_points[:, i] - self.bo_models[i].y_mean) / self.bo_models[i].y_std
                 # Log predictions for a sample of points
-                self.monitor.log_predictions(model, bo_model.likelihood, log_sampled_points, iteration, i+1)
+                self.monitor.log_predictions(model,
+                                             bo_model.likelihood,
+                                             norm_log_sampled_points,
+                                             Y_norm_points,
+                                             iteration,
+                                             i+1)
+
+            if NOISE:
+                self._update_and_normalize_reference_points(Y_train_noise)
+            else:
+                self._update_and_normalize_reference_points(Y_train)
 
             # Log acquisition function values
-            acq_values = self._compute_acquisition_batch(predictions,log_sampled_points, beta, weights)
+            norm_log_sampled_points = (log_sampled_points - self.bo_models[0].x_mean) / self.bo_models[0].x_std
+            acq_values = self._compute_acquisition_batch(predictions,norm_log_sampled_points, beta, weights)
             self.monitor.log_acquisition_values(acq_values, iteration)
+
+            if SCALAR == "AT":
+                self.scalarization = AugmentedTchebycheff(
+                    reference_point=self.current_reference_points,
+                    rho=self.rho
+                )
+            else:
+                self.scalarization = HypervolumeScalarization(
+                    nadir_point=self.current_nadir_points,
+                    exponent=self.output_dim
+                )
+
 
             # Optimize acquisition function using scalarization
             next_x = optimize_scalarized_acquisition(
@@ -669,17 +950,21 @@ class MultiObjectiveBayesianOptimization:
                 scalarization_func=self.scalarization,
                 weights=weights,
                 input_dim=self.input_dim,
-                beta=beta,
+                beta=self.beta,
                 x_mean=self.bo_models[0].x_mean,
                 x_std=self.bo_models[0].x_std
             )
 
             # Evaluate new point for all objectives simultaneously
             next_y = self._evaluate_objectives(next_x.unsqueeze(0))
+            if NOISE:
+                next_y_noise = next_y + 0.01 * torch.randn_like(next_y)
 
             # Update training data
             X_train = torch.cat([X_train, next_x.unsqueeze(0)])
             Y_train = torch.cat([Y_train, next_y])
+            if NOISE:
+                Y_train_noise = torch.cat([Y_train_noise, next_y_noise])
 
             # Update Pareto front
             self._update_pareto_front(X_train, Y_train)
@@ -706,10 +991,10 @@ class ContextualMultiObjectiveBayesianOptimization:
             objective_func,
             reference_point: torch.Tensor = None,
             inducing_points: Optional[torch.Tensor] = None,
-            train_steps: int = 500,
+            train_steps: int = 200,
             model_type: str = 'ExactGP',
             optimizer_type: str = 'adam',
-            rho: float = 0.05
+            rho: float = 0.001
     ):
         self.objective_func = objective_func
         self.input_dim = objective_func.input_dim
@@ -717,7 +1002,11 @@ class ContextualMultiObjectiveBayesianOptimization:
         self.context_dim = objective_func.context_dim
         self.dim = self.input_dim + self.context_dim
         self.output_dim = objective_func.output_dim
+        self.model_type = model_type
         self.contexts = None
+        self.base_beta = None
+        self.beta = None
+        self.rho = rho
 
         # Initialize reference point if not provided
         if reference_point is None:
@@ -725,14 +1014,27 @@ class ContextualMultiObjectiveBayesianOptimization:
         else:
             self.reference_point = reference_point
 
-        self.scalarization = AugmentedTchebycheff(
-            reference_point=self.reference_point,
-            rho=rho
-        )
+        # Context-specific reference and nadir points
+        self.current_reference_points = {}
+        self.current_nadir_points = {}
 
         self.nadir_point = self.objective_func.nadir_point
         self.hv = Hypervolume(ref_point=self.nadir_point.numpy())
         self.current_hv = -1
+
+        if SCALAR == "AT":
+            self.scalarization = AugmentedTchebycheff(
+                reference_point=self.reference_point,
+                rho=self.rho
+            )
+        else:
+            self.scalarization = HypervolumeScalarization(
+                nadir_point=self.nadir_point,
+                exponent=self.output_dim
+            )
+
+        new_train_steps = max(600, self.dim * train_steps)
+        self.new_train_steps = new_train_steps
 
         # Create individual BO models for each objective
         self.bo_models = []
@@ -747,7 +1049,7 @@ class ContextualMultiObjectiveBayesianOptimization:
             bo = ContextualBayesianOptimization(
                 objective_func=single_obj,
                 inducing_points=inducing_points,
-                train_steps=train_steps,
+                train_steps=new_train_steps,
                 model_type=model_type,
                 optimizer_type=optimizer_type
             )
@@ -761,6 +1063,72 @@ class ContextualMultiObjectiveBayesianOptimization:
         self.context_pareto_sets = {}
         self.context_hv = {}
         self.model_list = []
+        self.monitors = []  # Simple list for monitors
+        self.predictions = []
+
+    def _update_context_reference_and_nadir_points(self, context, Y_context):
+        """
+        Update reference and nadir points for a specific context
+        """
+        context_key = tuple(context.numpy())
+
+        # Initialize if not exist
+        self.current_reference_points[context_key] = torch.min(Y_context, dim=0)[0]
+        self.current_reference_points[context_key] = self.current_reference_points[context_key] - 0.1
+
+        self.current_nadir_points[context_key] = torch.max(Y_context, dim=0)[0]
+        self.current_nadir_points[context_key] = self.current_nadir_points[context_key] + 0.1 * torch.abs(
+            self.current_nadir_points[context_key])
+
+        # Normalize the nadir points and reference points
+        for ind in range(self.output_dim):
+            self.current_reference_points[context_key][ind] = self.bo_models[ind].normalize_output(
+                self.current_reference_points[context_key][ind])
+            self.current_nadir_points[context_key][ind] = self.bo_models[ind].normalize_output(
+                self.current_nadir_points[context_key][ind])
+
+    def _update_beta(self, iteration):
+        self.beta = math.sqrt(self.base_beta * log(1 + 2 * iteration))
+
+    def initialize_monitors(self, n_contexts, base_dir_name):
+        """Initialize GPMonitor for each context using numeric indexing"""
+        self.monitors = [GPMonitor(dir_name=f"{base_dir_name}_context_{i + 1}")
+                         for i in range(n_contexts)]
+
+    def _compute_acquisition_batch(self, predictions, log_sampled_points, beta, weights, context):
+        """Combine multiple acquisition values using scalarization"""
+        context_key = tuple(context.numpy())
+        x_norm = log_sampled_points
+
+        # Get acquisition values for each objective
+        acq_values = []
+        for model in predictions:
+            acq_value = ucb_acquisition_group(model["model"], model["likelihood"], x_norm, beta)
+            acq_values.append(torch.tensor(acq_value))
+
+        # Stack and scalarize
+        stacked_acq = torch.stack(acq_values, dim=-1)
+
+        if SCALAR == "AT":
+            self.scalarization = AugmentedTchebycheff(
+                reference_point=self.current_reference_points[context_key],
+                rho=self.rho
+            )
+        else:
+            self.scalarization = HypervolumeScalarization(
+                nadir_point=self.current_nadir_points[context_key],
+                exponent=self.output_dim
+            )
+
+        scalarized = self.scalarization(stacked_acq, weights)
+
+        return scalarized.numpy()  # Negative for minimization
+
+    @staticmethod
+    def _sample_points(n_points, n_decision_vars, n_context_vars):
+        """Generate a sample of points for monitoring predictions"""
+        total_dims = n_decision_vars + n_context_vars
+        return torch.rand(n_points, total_dims)
 
     @staticmethod
     def _generate_weight_vector(dim: int) -> torch.Tensor:
@@ -806,6 +1174,19 @@ class ContextualMultiObjectiveBayesianOptimization:
     ) -> Tuple[torch.Tensor, torch.Tensor]:
 
         self.contexts = contexts
+        self.base_beta = beta
+
+        n_contexts = contexts.shape[0]
+        base_dir_name = "CMOBO_{}_{}_{}".format(self.input_dim,
+                                                       self.output_dim,
+                                                       self.model_type)
+        self.initialize_monitors(n_contexts, base_dir_name)
+        log_sampled_points = self._sample_points(10000, self.input_dim, 0)
+
+        if NOISE:
+            Y_train_noise = Y_train + 0.01 * torch.randn_like(Y_train)
+
+
         # Initialize tracking for each context
         for context in contexts:
             context_mask = torch.all(X_train[:, self.input_dim:] == context, dim=1)
@@ -815,59 +1196,148 @@ class ContextualMultiObjectiveBayesianOptimization:
                 self._update_pareto_front_for_context(X_context, Y_context, context)
 
         for iteration in range(n_iter):
+            self._update_beta(iteration)
             # Generate random weights
             weights = self._generate_weight_vector(self.output_dim)
 
             # Train models for each objective
             predictions = []
-            for i, bo_model in enumerate(self.bo_models):
-                X_norm, y_norm = bo_model.normalize_data(
-                    X_train.clone(),
-                    Y_train[:, i].clone()
-                )
+            if iteration % 1 == 0:
+                for i, bo_model in enumerate(self.bo_models):
+                    if NOISE:
+                        X_norm, y_norm = bo_model.normalize_data(
+                            X_train.clone(),
+                            Y_train_noise[:, i].clone()
+                        )
+                    else:
+                        X_norm, y_norm = bo_model.normalize_data(
+                            X_train.clone(),
+                            Y_train[:, i].clone()
+                        )
 
-                model = bo_model.build_model(X_norm, y_norm)
-                model.train()
-                bo_model.likelihood.train()
+                    if iteration > 60:
+                        model = bo_model.build_model(X_norm, y_norm, True)
+                    else:
+                        model = bo_model.build_model(X_norm, y_norm, False)
+                    model.train()
+                    bo_model.likelihood.train()
 
-                # Training loop (same as before)
-                optimizer = torch.optim.Adam(model.parameters(),
-                                             lr=0.01) if bo_model.optimizer_type == 'adam' else torch.optim.LBFGS(
-                    model.parameters(), lr=0.1, max_iter=20)
+                    # Training loop (same as before)
+                    optimizer = torch.optim.Adam(model.parameters(),
+                                                 lr=0.1) if bo_model.optimizer_type == 'adam' else FullBatchLBFGS(
+                        model.parameters())
 
-                # Definition of likelihood
-                if bo_model.model_type == 'SVGP':
-                    mll = gpytorch.mlls.VariationalELBO(
-                        bo_model.likelihood,
-                        model,
-                        num_data=y_norm.size(0)
+                    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                        optimizer,
+                        T_max=self.new_train_steps,  # First cycle length
+                        eta_min=1e-4
                     )
-                else:
-                    mll = gpytorch.mlls.ExactMarginalLogLikelihood(
-                        bo_model.likelihood,
-                        model
-                    )
 
-                # Training Loop
-                for _ in range(bo_model.train_steps):
-                    def closure():
-                        optimizer.zero_grad()
-                        output = model(X_norm)
-                        loss = -mll(output, y_norm)
+                    # Definition of likelihood
+                    if bo_model.model_type == 'SVGP':
+                        mll = gpytorch.mlls.VariationalELBO(
+                            bo_model.likelihood,
+                            model,
+                            num_data=y_norm.size(0)
+                        )
+                    else:
+                        mll = gpytorch.mlls.ExactMarginalLogLikelihood(
+                            bo_model.likelihood,
+                            model
+                        )
+
+                    # Training Loop
+                    if bo_model.optimizer_type == 'lbfgs':
+                        def closure():
+                            optimizer.zero_grad()
+                            output = model(X_norm)
+                            loss = -mll(output, y_norm)
+                            return loss
+
+                        prev_loss = float('inf')
+                        loss = closure()
                         loss.backward()
-                        return loss
+                        for dummy_range in range(60):
+                            options = {'closure': closure, 'current_loss': loss, 'max_ls': 10}
+                            loss, _, lr, _, F_eval, G_eval, _, _ = optimizer.step(options)
 
-                    optimizer.step(
-                        closure if bo_model.optimizer_type == 'lbfgs' else None
-                    )
+                    else:
+                        prev_loss = float('inf')
+                        for _ in range(bo_model.train_steps):
+                            optimizer.zero_grad()
+                            output = model(X_norm)
+                            loss = -mll(output, y_norm)
+                            loss.backward()
+                            optimizer.step()
+                            scheduler.step()
+                            prev_loss = loss.item()
 
-                predictions.append({"model": model, "likelihood": bo_model.likelihood})
+                            if _ % 100 == 0:
+                                print("current loss is {}".format(prev_loss))
+
+                    bo_model.model = model
+                    predictions.append({"model": model, "likelihood": bo_model.likelihood})
+                    for context_id, context in enumerate(contexts):
+                        cur_monitor = self.monitors[context_id]
+                        cur_monitor.log_kernel_params(model, i + 1, iteration)
+                        temp_log_sampled_points = torch.cat([log_sampled_points,
+                                                             context.unsqueeze(0).expand(log_sampled_points.shape[0], -1)],
+                                                            dim=1)
+                        norm_log_sampled_points = (temp_log_sampled_points - self.bo_models[0].x_mean) / self.bo_models[
+                            0].x_std
+                        Y_sampled_points = self.objective_func.evaluate(temp_log_sampled_points)[:, i]
+                        norm_Y_sampled_points = (Y_sampled_points - self.bo_models[i].y_mean) / self.bo_models[i].y_std
+                        cur_monitor.log_predictions(model,
+                                                    bo_model.likelihood,
+                                                    norm_log_sampled_points,
+                                                    norm_Y_sampled_points,
+                                                    iteration,
+                                                    i + 1)
+                for context_id, context in enumerate(contexts):
+                    context_mask = torch.all(X_train[:, self.input_dim:] == context, dim=1)
+                    if torch.any(context_mask):
+                        if NOISE:
+                            Y_context = Y_train_noise[context_mask]
+                        else:
+                            Y_context = Y_train[context_mask]
+                        # X_context = X_train[context_mask][:, :self.input_dim]
+                        self._update_context_reference_and_nadir_points(context, Y_context)
+
+            if len(predictions) > 0:
+                self.predictions = predictions
+            else:
+                predictions = self.predictions
+
+            for context_id, context in enumerate(contexts):
+                # Log acquisition function values
+                cur_monitor = self.monitors[context_id]
+                temp_log_sampled_points = torch.cat([log_sampled_points,
+                                                     context.unsqueeze(0).expand(log_sampled_points.shape[0], -1)],
+                                                    dim=1)
+                norm_log_sampled_points = (temp_log_sampled_points - self.bo_models[0].x_mean) / self.bo_models[0].x_std
+                acq_values = self._compute_acquisition_batch(predictions, norm_log_sampled_points, self.beta, weights,
+                                                             context)
+                cur_monitor.log_acquisition_values(acq_values, iteration)
 
             # Optimize for each context
             next_points = []
             next_values = []
+            next_values_noise = []
 
             for context in contexts:
+                context_key = tuple(context.numpy())
+
+                if SCALAR == "AT":
+                    self.scalarization = AugmentedTchebycheff(
+                        reference_point=self.current_reference_points[context_key],
+                        rho=self.rho
+                    )
+                else:
+                    self.scalarization = HypervolumeScalarization(
+                        nadir_point=self.current_nadir_points[context_key],
+                        exponent=self.output_dim
+                    )
+
                 next_x = optimize_scalarized_acquisition_for_context(
                     models=predictions,
                     context=context,
@@ -882,9 +1352,13 @@ class ContextualMultiObjectiveBayesianOptimization:
                 x_c = torch.cat([next_x, context])
                 # print("x_c shape is:{}".format(x_c.shape))
                 next_y = self.objective_func.evaluate(x_c.clone().unsqueeze(0))
+                if NOISE:
+                    next_y_noise = next_y + 0.01 * torch.randn_like(next_y)
 
                 next_points.append(x_c)
                 next_values.append(next_y)
+                if NOISE:
+                    next_values_noise.append(next_y_noise)
 
                 # Update Pareto front for this context
                 # context_mask = torch.all(x_c[self.input_dim:] == context, dim=0)
@@ -898,16 +1372,25 @@ class ContextualMultiObjectiveBayesianOptimization:
             # Update training data
             next_points = torch.stack(next_points)
             next_values = torch.stack(next_values)
-
+            if NOISE:
+                next_values_noise = torch.stack(next_values_noise)
+                Y_train_noise = torch.cat([Y_train_noise, next_values_noise.squeeze(1)])
             X_train = torch.cat([X_train, next_points])
             Y_train = torch.cat([Y_train, next_values.squeeze(1)])
 
-            for context in contexts:
+
+            for context_id, context in enumerate(contexts):
                 context_mask = torch.all(X_train[:, self.input_dim:] == context, dim=1)
+                context_key = tuple(context.numpy())
                 if torch.any(context_mask):
                     Y_context = Y_train[context_mask]
                     X_context = X_train[context_mask][:, :self.input_dim]
                     self._update_pareto_front_for_context(X_context, Y_context, context)
+                metrics = {
+                    'hypervolume': self.context_hv[context_key][-1],
+                    'pareto_points': self.context_pareto_fronts[context_key][-1]
+                }
+                self.monitors[context_id].log_optimization_metrics(metrics, iteration)
 
             if iteration % 5 == 0:
                 print(f'Iteration {iteration}/{n_iter}')

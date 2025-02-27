@@ -5,6 +5,16 @@ from scipy.optimize import minimize
 import gpytorch
 
 
+def ucb_acquisition_group(model, likelihood, x, beta=2.0):
+    model.eval()
+    likelihood.eval()
+    with torch.no_grad(), gpytorch.settings.fast_pred_var():
+        pred = likelihood(model(x))
+        mean = pred.mean
+        std = pred.variance.sqrt()
+    return (mean - beta * std).detach().numpy()  # Negative for maximization
+
+
 def ucb_acquisition(model, likelihood, x, beta=2.0):
     model.eval()
     likelihood.eval()
@@ -113,6 +123,8 @@ def optimize_scalarized_acquisition(
             best_value = res.fun
             best_x = res.x
 
+    print("best_value is {}".format(best_value))
+
     return torch.tensor(best_x, dtype=torch.float32)
 
 
@@ -213,6 +225,8 @@ def optimize_scalarized_acquisition_for_context(
         if res.fun < best_value:
             best_value = res.fun
             best_x = res.x
+
+    print("context best_value is {}".format(best_value))
 
     return torch.tensor(best_x, dtype=torch.float32)
 

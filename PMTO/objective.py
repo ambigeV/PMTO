@@ -252,7 +252,7 @@ class ContextualMultiObjectiveFunction:
         self.nadir_point = {
             'dtlz1': (160 + 100 * (self.n_variables - 2)) * torch.ones(self.n_objectives),
             'dtlz2': 1.25 ** (self.n_variables - 1) * torch.ones(self.n_objectives) + 0.5,
-            'dtlz3': 100 * (self.n_variables + self.n_variables * 1.25) * torch.ones(self.n_objectives),
+            'dtlz3': 100 * (self.n_variables + self.n_variables) * torch.ones(self.n_objectives),
         }[self.func_name]
 
     def scale_x(self, x):
@@ -265,15 +265,16 @@ class ContextualMultiObjectiveFunction:
         Get shift value from first context dimension.
         Maps c[0] from [0,1] to [-0.2, 0.2]
         """
-        return 0.4 * c[:, 0] - 0.2  # First context dimension controls shift
+        # return 0.4 * c[:, 0] - 0.2  # First context dimension controls shift
+        return 0 * c[:, 0]
 
     def get_context_power(self, c):
         """
         Get power scaling from second context dimension.
         Maps c[1] from [0,1] to [0.8, 1.0]
         """
-        # return 0.8 + 0.2 * c[:, 1]  # Second context dimension controls power
-        return 0 * c[:, 1] + 1.0
+        return 0.8 + 0.2 * c[:, 1]  # Second context dimension controls power
+        # return 0 * c[:, 1] + 1.0
 
     def g_dtlz1(self, x_m, c):
         """
@@ -281,7 +282,9 @@ class ContextualMultiObjectiveFunction:
         Context is scaled to [-0.2, 0.2] for shifting.
         """
         c_shift = self.get_context_shift(c)
-        x_shifted = x_m - c_shift.unsqueeze(-1)
+        c_power = self.get_context_power(c)
+        x_shifted = torch.pow(x_m - c_shift.unsqueeze(-1), c_power.unsqueeze(-1))
+
 
         return 100 * (x_m.shape[1] + torch.sum(
             (x_shifted - 0.5) ** 2 - torch.cos(20 * np.pi * (x_shifted - 0.5)),
@@ -294,7 +297,9 @@ class ContextualMultiObjectiveFunction:
         Context is scaled to [-0.2, 0.2] for shifting.
         """
         c_shift = self.get_context_shift(c)
-        x_shifted = x_m - c_shift.unsqueeze(-1)
+        c_power = self.get_context_power(c)
+        x_shifted = torch.pow(x_m - c_shift.unsqueeze(-1), c_power.unsqueeze(-1))
+
         return torch.sum((x_shifted - 0.5) ** 2, dim=1)
 
     def evaluate(self, inputs: torch.Tensor) -> torch.Tensor:
@@ -334,7 +339,7 @@ class ContextualMultiObjectiveFunction:
 
         f = torch.zeros((x.shape[0], self.n_objectives))
 
-        print("Shapes are g:{}, f:{}, power:{}.".format(g.shape, f.shape, power.shape))
+        # print("Shapes are g:{}, f:{}, power:{}.".format(g.shape, f.shape, power.shape))
 
         for i in range(self.n_objectives):
             f[:, i] = 0.5 * (1 + g)
@@ -343,7 +348,7 @@ class ContextualMultiObjectiveFunction:
                 f[:, i] = f[:, i] * torch.pow(x_p[:, j], power)
 
             if i > 0:
-                f[:, i] = f[:, i] * torch.pow(1 - x_p[:, self.n_objectives - 1 - i], power)
+                f[:, i] = f[:, i] * (1 - torch.pow(x_p[:, self.n_objectives - 1 - i], power))
 
         return f
 

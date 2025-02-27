@@ -43,6 +43,10 @@ def parse_arguments():
                        help='Number of variables (default: 5)')
     parser.add_argument('--beta', type=float, default=1.0,
                         help='Number of controlling param beta (default: 1.0)')
+    parser.add_argument('--model_type', type=str, default='ExactGP',
+                        help='Number of controlling GP model type')
+    parser.add_argument('--method_name', type=str, default='MOBO',
+                        help='Number of controlling GP model type')
     return parser.parse_args()
 
 
@@ -251,7 +255,7 @@ def visualize_contextual_effects(func_name='dtlz2', n_objectives=2, n_samples=50
 
 
 def random_test_obj():
-    obj_func = ContextualMultiObjectiveFunction(func_name='dtlz2', n_objectives=2, n_variables=5)
+    obj_func = ContextualMultiObjectiveFunction(func_name='dtlz3', n_objectives=2, n_variables=5)
     x = torch.rand(1000000, obj_func.input_dim + obj_func.context_dim)
     y = obj_func.evaluate(x)
     print(f"Input shape: {x.shape}, Output shape: {y.shape}")
@@ -280,7 +284,7 @@ def random_test_boundary():
 
 
 def context_influence_test_grid():
-    obj_func = ContextualMultiObjectiveFunction(func_name='dtlz3', n_objectives=2, n_variables=5)
+    obj_func = ContextualMultiObjectiveFunction(func_name='dtlz2', n_objectives=2, n_variables=2)
     x_fixed = torch.rand(1, obj_func.input_dim)
 
     # Create a grid of contexts
@@ -356,14 +360,15 @@ def plot_contexts(contexts):
         print("Cannot visualize contexts with more than 3 dimensions")
 
 
-def optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2, n_variables=5, temp_beta=1.0):
+def optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2,
+                           n_variables=5, temp_beta=1.0, model_type="ExactGP"):
     # Initialize the objective function
     obj_func = ContextualMultiObjectiveFunction(func_name=problem_name,
                                                 n_objectives=n_objectives,
                                                 n_variables=n_variables)
 
     # Set up fixed contexts using LHS
-    n_contexts = 16
+    n_contexts = 8
     contexts_file = 'data/context_{}_{}.pth'.format(n_contexts, obj_func.context_dim)
 
     if os.path.exists(contexts_file):
@@ -374,10 +379,11 @@ def optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objective
     # Plot the contexts
     plot_contexts(contexts)
 
-    timestamp = "{}_{}_{}_{:.2f}_test".format(problem_name,
-                                              n_variables,
-                                              n_objectives,
-                                              temp_beta)
+    timestamp = "{}_{}_{}_{:.2f}_test_{}_hv".format(problem_name,
+                                                 n_variables,
+                                                 n_objectives,
+                                                 temp_beta,
+                                                 model_type)
 
     for run in range(n_runs):
         print(f"Starting run {run + 1}/{n_runs}")
@@ -385,15 +391,20 @@ def optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objective
         # Initialize the optimizer
         optimizer = ContextualMultiObjectiveBayesianOptimization(
             objective_func=obj_func,
+            model_type = model_type
         )
 
         # Generate initial points
-        n_initial_points = 20
+        n_initial_points = 30
         X_init = torch.zeros(n_initial_points * n_contexts, obj_func.input_dim + obj_func.context_dim)
         for i in range(n_contexts):
             start_idx = i * n_initial_points
             end_idx = (i + 1) * n_initial_points
-            X_init[start_idx:end_idx, :obj_func.input_dim] = torch.rand(n_initial_points, obj_func.input_dim)
+            # sampler = qmc.LatinHypercube(d=obj_func.input_dim)
+            # base_sampler = sampler.random(n=n_initial_points)
+            # init_points = torch.tensor(base_sampler, dtype=torch.float32)
+            init_points = torch.load("data/init_points_context_{}_{}.pth".format(i, obj_func.input_dim))
+            X_init[start_idx:end_idx, :obj_func.input_dim] = init_points
             X_init[start_idx:end_idx, obj_func.input_dim:] = contexts[i].repeat(n_initial_points, 1)
 
         # Evaluate initial points
@@ -445,12 +456,15 @@ def optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objective
         plt.close()
 
 
-def run_mobo_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2, n_variables=5, temp_beta=1.0):
+def run_mobo_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2,
+                  n_variables=5, temp_beta=1.0, model_type="ExactGP"):
     # Initialize the objective function
-    obj_func = ContextualMultiObjectiveFunction(func_name=problem_name, n_objectives=2, n_variables=5)
+    obj_func = ContextualMultiObjectiveFunction(func_name=problem_name,
+                                                n_objectives=n_objectives,
+                                                n_variables=n_variables)
 
     # Set up fixed contexts using LHS
-    n_contexts = 16
+    n_contexts = 8
     contexts_file = 'data/context_{}_{}.pth'.format(n_contexts, obj_func.context_dim)
 
     if os.path.exists(contexts_file):
@@ -458,7 +472,7 @@ def run_mobo_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2, n_va
     else:
         contexts = generate_and_save_contexts(n_contexts, obj_func.context_dim, contexts_file)
 
-    timestamp = "{}_{}_{}_{:.2f}_test".format(problem_name,
+    timestamp = "{}_{}_{}_{:.2f}_test_hv".format(problem_name,
                                               n_variables,
                                               n_objectives,
                                               temp_beta)
@@ -482,12 +496,18 @@ def run_mobo_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2, n_va
                     context_dim=obj_func.context_dim,
                     output_dim=obj_func.output_dim,
                     nadir_point=obj_func.nadir_point
-                )
+                ),
+                model_type=model_type,
+                mobo_id=context_idx+1,
             )
 
             # Generate initial points for this context
-            n_initial_points = 20
-            X_init = torch.rand(n_initial_points, obj_func.input_dim)
+            n_initial_points = 30
+            # X_init = torch.rand(n_initial_points, obj_func.input_dim)
+            # sampler = qmc.LatinHypercube(d=obj_func.input_dim)
+            # base_sampler = sampler.random(n=n_initial_points)
+            # X_init = torch.tensor(base_sampler, dtype=torch.float32)
+            X_init = torch.load("data/init_points_context_{}_{}.pth".format(context_idx, obj_func.input_dim))
             Y_init = context_specific_obj(X_init)
 
             # Run optimization
@@ -507,7 +527,7 @@ def run_mobo_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2, n_va
         print(f"Run {run} data saved to {save_path}")
 
         # Plot results for this run
-        fig, axes = plt.subplots(4, 4, figsize=(20, 20))
+        fig, axes = plt.subplots(2, 4, figsize=(20, 20))
         fig.suptitle(f'MOBO Hypervolume History for Each Context (Run {run + 1})', fontsize=16)
 
         for context_idx, context in enumerate(contexts):
@@ -539,32 +559,79 @@ def main():
     print(f"- Number of objectives: {args.n_objectives}")
     print(f"- Number of variables: {args.n_variables}")
     print(f"- Number of control beta: {args.beta}")
+    print(f"- Model Type: {args.model_type}")
+    print(f"- Method Name: {args.method_name}")
 
-    # Run both tests with the specified parameters
-    optimization_loop_test(
-        problem_name=args.problem,
-        n_runs=args.n_runs,
-        n_iter=args.n_iter,
-        n_objectives=args.n_objectives,
-        n_variables=args.n_variables,
-        temp_beta=args.beta,
-    )
+    if args.method_name == "CMOBO":
+        # Run both tests with the specified parameters
+        optimization_loop_test(
+            problem_name=args.problem,
+            n_runs=args.n_runs,
+            n_iter=args.n_iter,
+            n_objectives=args.n_objectives,
+            n_variables=args.n_variables,
+            temp_beta=args.beta,
+            model_type=args.model_type,
+        )
 
-    run_mobo_test(
-        problem_name=args.problem,
-        n_runs=args.n_runs,
-        n_iter=args.n_iter,
-        n_objectives=args.n_objectives,
-        n_variables=args.n_variables,
-        temp_beta=args.beta,
-    )
+    if args.method_name == "MOBO":
+        run_mobo_test(
+            problem_name=args.problem,
+            n_runs=args.n_runs,
+            n_iter=args.n_iter,
+            n_objectives=args.n_objectives,
+            n_variables=args.n_variables,
+            temp_beta=args.beta,
+            model_type=args.model_type,
+        )
 
+    if args.method_name == "ALL":
+        optimization_loop_test(
+            problem_name=args.problem,
+            n_runs=args.n_runs,
+            n_iter=args.n_iter,
+            n_objectives=args.n_objectives,
+            n_variables=args.n_variables,
+            temp_beta=args.beta,
+            model_type="ArdGP",
+        )
+
+        optimization_loop_test(
+            problem_name=args.problem,
+            n_runs=args.n_runs,
+            n_iter=args.n_iter,
+            n_objectives=args.n_objectives,
+            n_variables=args.n_variables,
+            temp_beta=args.beta,
+            model_type="ExactGP",
+        )
+
+        run_mobo_test(
+            problem_name=args.problem,
+            n_runs=args.n_runs,
+            n_iter=args.n_iter,
+            n_objectives=args.n_objectives,
+            n_variables=args.n_variables,
+            temp_beta=args.beta,
+            model_type="ArdGP",
+        )
+
+        run_mobo_test(
+            problem_name=args.problem,
+            n_runs=args.n_runs,
+            n_iter=args.n_iter,
+            n_objectives=args.n_objectives,
+            n_variables=args.n_variables,
+            temp_beta=args.beta,
+            model_type="ExactGP",
+        )
 
 if __name__ == "__main__":
     # Set random seed for reproducibility
     torch.manual_seed(42)
     # np.random.seed(42)
     main()
+    # generate_and_save_contexts()
     # Run tests
     # optimization_loop_test()
     # run_mobo_test()
