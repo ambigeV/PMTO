@@ -251,8 +251,9 @@ class ContextualMultiObjectiveFunction:
 
         self.nadir_point = {
             'dtlz1': (160 + 100 * (self.n_variables - 2)) * torch.ones(self.n_objectives),
-            'dtlz2': 1.25 ** (self.n_variables - 1) * torch.ones(self.n_objectives) + 0.5,
-            'dtlz3': 100 * (self.n_variables + self.n_variables) * torch.ones(self.n_objectives),
+            'dtlz2': torch.ones(self.n_objectives) * 2.0,
+            # 'dtlz2': 1.15 ** (self.n_variables - 1) * torch.ones(self.n_objectives) ,
+            'dtlz3': 90 * (self.n_variables + self.n_variables) * torch.ones(self.n_objectives),
         }[self.func_name]
 
     def scale_x(self, x):

@@ -17,6 +17,7 @@ from torch.utils.tensorboard import SummaryWriter
 from .LBFGS import FullBatchLBFGS
 
 IF_PLOT = False
+IF_GLOBAL = True
 SCALAR = "HV"
 NOISE = False
 # "AT"
@@ -228,7 +229,7 @@ class HypervolumeScalarization:
 class AugmentedTchebycheff:
     """Augmented Tchebycheff scalarization"""
 
-    def __init__(self, reference_point: torch.Tensor, rho: float = 0.001):
+    def __init__(self, reference_point: torch.Tensor, rho: float = 0.05):
         self.reference_point = reference_point
         self.rho = rho
 
@@ -1016,7 +1017,9 @@ class ContextualMultiObjectiveBayesianOptimization:
 
         # Context-specific reference and nadir points
         self.current_reference_points = {}
+        self.global_reference_point = None
         self.current_nadir_points = {}
+        self.global_nadir_point = None
 
         self.nadir_point = self.objective_func.nadir_point
         self.hv = Hypervolume(ref_point=self.nadir_point.numpy())
@@ -1086,6 +1089,17 @@ class ContextualMultiObjectiveBayesianOptimization:
                 self.current_reference_points[context_key][ind])
             self.current_nadir_points[context_key][ind] = self.bo_models[ind].normalize_output(
                 self.current_nadir_points[context_key][ind])
+
+    def _update_global_reference_and_nadir_points(self, Y_train):
+        self.global_reference_point = torch.min(Y_train, dim=0)[0] - 0.1
+        self.global_nadir_point = torch.max(Y_train, dim=0)[0] + 0.1 * torch.abs(
+            torch.max(Y_train, dim=0)[0])
+
+        for ind in range(self.output_dim):
+            self.global_reference_point[ind] = self.bo_models[ind].normalize_output(
+                self.global_reference_point[ind])
+            self.global_nadir_point[ind] = self.bo_models[ind].normalize_output(
+                self.global_nadir_point[ind])
 
     def _update_beta(self, iteration):
         self.beta = math.sqrt(self.base_beta * log(1 + 2 * iteration))
@@ -1227,11 +1241,16 @@ class ContextualMultiObjectiveBayesianOptimization:
                                                  lr=0.1) if bo_model.optimizer_type == 'adam' else FullBatchLBFGS(
                         model.parameters())
 
-                    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                    scheduler = torch.optim.lr_scheduler.MultiStepLR(
                         optimizer,
-                        T_max=self.new_train_steps,  # First cycle length
-                        eta_min=1e-4
+                        milestones=[int(self.new_train_steps * 0.5), int(self.new_train_steps * 0.75)],
+                        gamma=0.1
                     )
+                    # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                    #     optimizer,
+                    #     T_max=self.new_train_steps,  # First cycle length
+                    #     eta_min=1e-4
+                    # )
 
                     # Definition of likelihood
                     if bo_model.model_type == 'SVGP':
@@ -1293,6 +1312,9 @@ class ContextualMultiObjectiveBayesianOptimization:
                                                     norm_Y_sampled_points,
                                                     iteration,
                                                     i + 1)
+
+                self._update_global_reference_and_nadir_points(Y_train)
+
                 for context_id, context in enumerate(contexts):
                     context_mask = torch.all(X_train[:, self.input_dim:] == context, dim=1)
                     if torch.any(context_mask):
@@ -1328,15 +1350,27 @@ class ContextualMultiObjectiveBayesianOptimization:
                 context_key = tuple(context.numpy())
 
                 if SCALAR == "AT":
-                    self.scalarization = AugmentedTchebycheff(
-                        reference_point=self.current_reference_points[context_key],
-                        rho=self.rho
-                    )
+                    if IF_GLOBAL:
+                        self.scalarization = AugmentedTchebycheff(
+                            reference_point=self.global_reference_point,
+                            rho=self.rho
+                        )
+                    else:
+                        self.scalarization = AugmentedTchebycheff(
+                            reference_point=self.current_reference_points[context_key],
+                            rho=self.rho
+                        )
                 else:
-                    self.scalarization = HypervolumeScalarization(
-                        nadir_point=self.current_nadir_points[context_key],
-                        exponent=self.output_dim
-                    )
+                    if IF_GLOBAL:
+                        self.scalarization = HypervolumeScalarization(
+                            nadir_point=self.global_nadir_point,
+                            exponent=self.output_dim
+                        )
+                    else:
+                        self.scalarization = HypervolumeScalarization(
+                            nadir_point=self.current_nadir_points[context_key],
+                            exponent=self.output_dim
+                        )
 
                 next_x = optimize_scalarized_acquisition_for_context(
                     models=predictions,

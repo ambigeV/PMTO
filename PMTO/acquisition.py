@@ -134,7 +134,7 @@ def optimize_acquisition_for_context(
         context: torch.Tensor,
         x_dim: int,
         beta: float = 2.0,
-        n_restarts: int = 10,
+        n_restarts: int = 5,
         bounds: tuple = (0, 1),
         x_mean: torch.Tensor = None,
         x_std: torch.Tensor = None
@@ -180,7 +180,7 @@ def optimize_scalarized_acquisition_for_context(
         scalarization_func: Callable,
         weights: torch.Tensor,
         beta: float = 2.0,
-        n_restarts: int = 10,
+        n_restarts: int = 20,
         bounds: tuple = (0, 1),
         x_mean: torch.Tensor = None,
         x_std: torch.Tensor = None

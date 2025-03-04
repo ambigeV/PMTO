@@ -71,9 +71,10 @@ class ArdGPModel(gpytorch.models.ExactGP):
 class CompositeKernel(gpytorch.kernels.Kernel):
     def __init__(self, n_decision_vars, n_context_vars):
         super().__init__()
+        lengthscale_constraint = gpytorch.constraints.Interval(0.1, 2.5)
         self.n_decision = n_decision_vars
         self.n_context = n_context_vars
-        self.k_decision = gpytorch.kernels.RBFKernel()
+        self.k_decision = gpytorch.kernels.RBFKernel(lengthscale_constraint=lengthscale_constraint)
         self.k_context = gpytorch.kernels.RBFKernel(ard_num_dims=self.n_context)
 
     def get_lengthscales(self):

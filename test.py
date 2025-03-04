@@ -379,7 +379,7 @@ def optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objective
     # Plot the contexts
     plot_contexts(contexts)
 
-    timestamp = "{}_{}_{}_{:.2f}_test_{}_hv".format(problem_name,
+    timestamp = "{}_{}_{}_{:.2f}_test_{}_hv_constrain".format(problem_name,
                                                  n_variables,
                                                  n_objectives,
                                                  temp_beta,
@@ -395,7 +395,7 @@ def optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objective
         )
 
         # Generate initial points
-        n_initial_points = 30
+        n_initial_points = 5
         X_init = torch.zeros(n_initial_points * n_contexts, obj_func.input_dim + obj_func.context_dim)
         for i in range(n_contexts):
             start_idx = i * n_initial_points
@@ -403,7 +403,9 @@ def optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objective
             # sampler = qmc.LatinHypercube(d=obj_func.input_dim)
             # base_sampler = sampler.random(n=n_initial_points)
             # init_points = torch.tensor(base_sampler, dtype=torch.float32)
-            init_points = torch.load("data/init_points_context_{}_{}.pth".format(i, obj_func.input_dim))
+            init_points = torch.load("data/init_points_context_{}_{}_{}.pth".format(i,
+                                                                                    obj_func.input_dim,
+                                                                                    n_initial_points))
             X_init[start_idx:end_idx, :obj_func.input_dim] = init_points
             X_init[start_idx:end_idx, obj_func.input_dim:] = contexts[i].repeat(n_initial_points, 1)
 
@@ -502,12 +504,14 @@ def run_mobo_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2,
             )
 
             # Generate initial points for this context
-            n_initial_points = 30
+            n_initial_points = 5
             # X_init = torch.rand(n_initial_points, obj_func.input_dim)
             # sampler = qmc.LatinHypercube(d=obj_func.input_dim)
             # base_sampler = sampler.random(n=n_initial_points)
             # X_init = torch.tensor(base_sampler, dtype=torch.float32)
-            X_init = torch.load("data/init_points_context_{}_{}.pth".format(context_idx, obj_func.input_dim))
+            X_init = torch.load("data/init_points_context_{}_{}_{}.pth".format(context_idx,
+                                                                               obj_func.input_dim,
+                                                                               n_initial_points))
             Y_init = context_specific_obj(X_init)
 
             # Run optimization

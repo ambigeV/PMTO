@@ -33,12 +33,12 @@ def generate_and_save_initial_points(n_contexts, input_dim=3, n_points=20, save_
         points_tensor = torch.tensor(points, dtype=torch.float32)
 
         # Save points for this context
-        save_path = os.path.join(save_dir, f'init_points_context_{context_idx}_{input_dim}.pth')
+        save_path = os.path.join(save_dir, f'init_points_context_{context_idx}_{input_dim}_{n_points}.pth')
         torch.save(points_tensor, save_path)
         print(f"Saved context {context_idx} points of shape {points_tensor.shape} to {save_path}")
 
 
-def load_initial_points(context_idx, save_dir='data', input_dim=5):
+def load_initial_points(context_idx, save_dir='data', input_dim=5, input_points=10):
     """
     Load initial points for a specific context.
 
@@ -49,7 +49,7 @@ def load_initial_points(context_idx, save_dir='data', input_dim=5):
     Returns:
         torch.Tensor: Initial points for the specified context of shape [n_points, input_dim]
     """
-    load_path = os.path.join(save_dir, f'init_points_context_{context_idx}_{input_dim}.pth')
+    load_path = os.path.join(save_dir, f'init_points_context_{context_idx}_{input_dim}_{input_points}.pth')
     return torch.load(load_path)
 
 
@@ -58,7 +58,7 @@ if __name__ == "__main__":
     # Configuration
     N_CONTEXTS = 8  # Number of contexts
     INPUT_DIM = 5  # 3D input space
-    N_POINTS = 30  # 20 points per context
+    N_POINTS = 5  # 20 points per context
 
     # Generate and save points
     generate_and_save_initial_points(
@@ -69,7 +69,7 @@ if __name__ == "__main__":
 
     # Load and verify points for each context
     for i in range(N_CONTEXTS):
-        points = load_initial_points(context_idx=i, input_dim=INPUT_DIM)
+        points = load_initial_points(context_idx=i, input_dim=INPUT_DIM, input_points=N_POINTS)
         print(f"\nLoaded points for context {i}:")
         print("Shape:", points.shape)
         print("First 3 points:")
