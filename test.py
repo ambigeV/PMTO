@@ -1,7 +1,8 @@
 from PMTO import BayesianOptimization, ObjectiveFunction, \
     MultiObjectiveFunction, MultiObjectiveBayesianOptimization, \
     ContextualBayesianOptimization, ContextualMultiObjectiveFunction, \
-    ContextualMultiObjectiveBayesianOptimization, PseudoObjectiveFunction
+    ContextualMultiObjectiveBayesianOptimization, PseudoObjectiveFunction, \
+    VAEEnhancedCMOBO
 import torch
 import matplotlib.pyplot as plt
 import numpy as np
@@ -458,6 +459,104 @@ def optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objective
         plt.close()
 
 
+def vae_optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2,
+                           n_variables=5, temp_beta=1.0, model_type="ExactGP"):
+    # Initialize the objective function
+    obj_func = ContextualMultiObjectiveFunction(func_name=problem_name,
+                                                n_objectives=n_objectives,
+                                                n_variables=n_variables)
+
+    # Set up fixed contexts using LHS
+    n_contexts = 8
+    contexts_file = 'data/context_{}_{}.pth'.format(n_contexts, obj_func.context_dim)
+
+    if os.path.exists(contexts_file):
+        contexts = torch.load(contexts_file)
+    else:
+        contexts = generate_and_save_contexts(n_contexts, obj_func.context_dim, contexts_file)
+
+    # Plot the contexts
+    plot_contexts(contexts)
+
+    timestamp = "{}_{}_{}_{:.2f}_test_{}_hv_constrain".format(problem_name,
+                                                 n_variables,
+                                                 n_objectives,
+                                                 temp_beta,
+                                                 model_type)
+
+    for run in range(n_runs):
+        print(f"Starting run {run + 1}/{n_runs}")
+
+        # Initialize the optimizer
+        optimizer = VAEEnhancedCMOBO(
+            objective_func=obj_func,
+            model_type = model_type
+        )
+
+        # Generate initial points
+        n_initial_points = 5
+        X_init = torch.zeros(n_initial_points * n_contexts, obj_func.input_dim + obj_func.context_dim)
+        for i in range(n_contexts):
+            start_idx = i * n_initial_points
+            end_idx = (i + 1) * n_initial_points
+            # sampler = qmc.LatinHypercube(d=obj_func.input_dim)
+            # base_sampler = sampler.random(n=n_initial_points)
+            # init_points = torch.tensor(base_sampler, dtype=torch.float32)
+            init_points = torch.load("data/init_points_context_{}_{}_{}.pth".format(i,
+                                                                                    obj_func.input_dim,
+                                                                                    n_initial_points))
+            X_init[start_idx:end_idx, :obj_func.input_dim] = init_points
+            X_init[start_idx:end_idx, obj_func.input_dim:] = contexts[i].repeat(n_initial_points, 1)
+
+        # Evaluate initial points
+        Y_init = obj_func.evaluate(X_init)
+
+        # Run optimization
+        X_opt, Y_opt = optimizer.optimize(X_init, Y_init, contexts, n_iter=n_iter, run=run)
+
+        # Store results for this run
+        run_data = {}
+        for i, context in enumerate(contexts):
+            context_key = tuple(context.numpy())
+            if context_key in optimizer.context_pareto_fronts:
+                run_data[context_key] = {
+                    'pareto_set_history': optimizer.context_pareto_sets[context_key],
+                    'pareto_front_history': optimizer.context_pareto_fronts[context_key],
+                    'hv_history': optimizer.context_hv[context_key]
+                }
+                print(f"Run {run + 1}, Context {i}: Final hypervolume = {optimizer.context_hv[context_key][-1]:.4f}")
+            else:
+                print(f"Run {run + 1}, Context {i}: No Pareto front found")
+
+        # Save individual run data
+        save_path = f'result/CMOBO_optimization_history_{timestamp}_run_{run}.pth'
+        torch.save(run_data, save_path)
+        print(f"Run {run + 1} data saved to {save_path}")
+
+        # Plot hypervolume history for this run
+        fig, axes = plt.subplots(4, 4, figsize=(20, 20))
+        fig.suptitle(f'Hypervolume History for Each Context (Run {run + 1})', fontsize=16)
+
+        for i, context in enumerate(contexts):
+            row = i // 4
+            col = i % 4
+            ax = axes[row, col]
+
+            context_key = tuple(context.numpy())
+            if context_key in run_data:
+                hv_history = run_data[context_key]['hv_history']
+                ax.plot(range(len(hv_history)), hv_history, label=f'Run {run + 1}')
+
+            ax.set_title(f'Context {i}')
+            ax.set_xlabel('Iteration')
+            ax.set_ylabel('Hypervolume')
+            ax.legend()
+
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+        plt.savefig(f'result/CMOBO_hypervolume_history_grid_{timestamp}_run_{run}.png')
+        plt.close()
+
+
 def run_mobo_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2,
                   n_variables=5, temp_beta=1.0, model_type="ExactGP"):
     # Initialize the objective function
@@ -578,6 +677,18 @@ def main():
             model_type=args.model_type,
         )
 
+    if args.method_name == "VAE-CMOBO":
+        # Run both tests with the specified parameters
+        vae_optimization_loop_test(
+            problem_name=args.problem,
+            n_runs=args.n_runs,
+            n_iter=args.n_iter,
+            n_objectives=args.n_objectives,
+            n_variables=args.n_variables,
+            temp_beta=args.beta,
+            model_type=args.model_type,
+        )
+
     if args.method_name == "MOBO":
         run_mobo_test(
             problem_name=args.problem,
@@ -629,6 +740,7 @@ def main():
             temp_beta=args.beta,
             model_type="ExactGP",
         )
+
 
 if __name__ == "__main__":
     # Set random seed for reproducibility

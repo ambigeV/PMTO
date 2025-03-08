@@ -15,6 +15,9 @@ import matplotlib.pyplot as plt
 from torch.utils.tensorboard import SummaryWriter
 # Optimizer
 from .LBFGS import FullBatchLBFGS
+# CVAE Model
+from .gen_models import ParetoVAETrainer
+
 
 IF_PLOT = False
 IF_GLOBAL = True
@@ -225,6 +228,7 @@ class HypervolumeScalarization:
         min_val, _ = torch.min(exp_ratio, dim=-1)
         # Return the negative so that minimizing the scalarized value corresponds to better (lower) objective values.
         return -min_val
+
 
 class AugmentedTchebycheff:
     """Augmented Tchebycheff scalarization"""
@@ -930,7 +934,7 @@ class MultiObjectiveBayesianOptimization:
 
             # Log acquisition function values
             norm_log_sampled_points = (log_sampled_points - self.bo_models[0].x_mean) / self.bo_models[0].x_std
-            acq_values = self._compute_acquisition_batch(predictions,norm_log_sampled_points, beta, weights)
+            acq_values = self._compute_acquisition_batch(predictions, norm_log_sampled_points, beta, weights)
             self.monitor.log_acquisition_values(acq_values, iteration)
 
             if SCALAR == "AT":
@@ -1436,3 +1440,602 @@ class ContextualMultiObjectiveBayesianOptimization:
 
         return X_train, Y_train
 
+
+class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
+    """
+    VAE-enhanced Contextual Multi-Objective Bayesian Optimization.
+    Extends the base CMOBO class with VAE capabilities for improved exploration.
+    """
+
+    def __init__(
+            self,
+            objective_func,
+            reference_point: torch.Tensor = None,
+            inducing_points: Optional[torch.Tensor] = None,
+            train_steps: int = 200,
+            model_type: str = 'ExactGP',
+            optimizer_type: str = 'adam',
+            rho: float = 0.001,
+            # VAE-specific parameters
+            vae_training_frequency: int = 5,
+            vae_min_data_points: int = 8,
+            vae_latent_dim: Optional[int] = None,
+            vae_epochs: int = 50,
+            vae_batch_size: int = 32,
+            use_noise: bool = False,
+            scalar_type: str = "HV",
+            use_global_reference: bool = True
+    ):
+        # Initialize the parent class
+        super().__init__(
+            objective_func=objective_func,
+            reference_point=reference_point,
+            inducing_points=inducing_points,
+            train_steps=train_steps,
+            model_type=model_type,
+            optimizer_type=optimizer_type,
+            rho=rho
+        )
+
+        # VAE-specific parameters
+        self.vae_training_frequency = vae_training_frequency
+        self.vae_min_data_points = vae_min_data_points
+        self.vae_latent_dim = vae_latent_dim or max(1, self.output_dim - 1)
+        self.vae_epochs = vae_epochs
+        self.vae_batch_size = vae_batch_size
+        self.vae_model = None
+
+        # Settings - override global constants with instance variables for cleaner design
+        self.USE_NOISE = use_noise
+        self.SCALAR = scalar_type
+        self.IF_GLOBAL = use_global_reference
+
+        # New structure for VAE training data (ranks 1 and 2)
+        self.vae_training_sets = {}
+        self.vae_training_fronts = {}
+        self.vae_training_contexts = {}
+
+    def _update_pareto_front_for_context(self, X: torch.Tensor, Y: torch.Tensor, context: torch.Tensor):
+        """
+        Override the parent method to additionally collect rank-1 and rank-2 solutions for VAE training.
+        """
+        context_key = tuple(context.numpy())
+
+        # Convert to numpy for pymoo
+        Y_np = Y.numpy()
+
+        # Get non-dominated sorting with multiple fronts
+        fronts = NonDominatedSorting().do(Y_np)
+
+        # Initialize regular tracking structures (same as parent class)
+        if context_key not in self.context_hv:
+            self.context_hv[context_key] = []
+        if context_key not in self.context_pareto_fronts:
+            self.context_pareto_fronts[context_key] = []
+        if context_key not in self.context_pareto_sets:
+            self.context_pareto_sets[context_key] = []
+
+        # Initialize VAE training data structures
+        if context_key not in self.vae_training_sets:
+            self.vae_training_sets[context_key] = []
+        if context_key not in self.vae_training_fronts:
+            self.vae_training_fronts[context_key] = []
+        if context_key not in self.vae_training_contexts:
+            self.vae_training_contexts[context_key] = []
+
+        # Update regular Pareto front tracking (rank-1 only) - same as parent class
+        pareto_front = Y[fronts[0]]
+        pareto_set = X[fronts[0]]
+        self.context_pareto_fronts[context_key].append(pareto_front)
+        self.context_pareto_sets[context_key].append(pareto_set)
+
+        # Calculate hypervolume using rank-1 solutions only
+        hv = self.hv.do(pareto_front.numpy())
+        self.context_hv[context_key].append(hv)
+
+        # Collect solutions for VAE training (rank-1 and rank-2)
+        vae_sets = []
+        vae_fronts = []
+
+        # Include rank-1 solutions
+        vae_sets.append(pareto_set)
+        vae_fronts.append(pareto_front)
+
+        # Add rank-2 solutions if available
+        if len(fronts) > 1 and len(fronts[1]) > 0:
+            rank2_front = Y[fronts[1]]
+            rank2_set = X[fronts[1]]
+            vae_sets.append(rank2_set)
+            vae_fronts.append(rank2_front)
+
+        # Combine all solutions
+        combined_set = torch.cat(vae_sets) if len(vae_sets) > 0 else torch.tensor([])
+        combined_front = torch.cat(vae_fronts) if len(vae_fronts) > 0 else torch.tensor([])
+
+        # Only proceed if we have data to work with
+        if len(combined_set) > 0:
+            # Compute weight vectors for each solution
+            reference_point = self.global_reference_point
+            combined_contexts = []
+
+            for y_value in combined_front:
+                weight = self.compute_weight_from_solution(y_value, reference_point, context_key)
+                # Combine context and weight for VAE conditioning
+                combined_context = torch.cat([context[1:], weight])
+                combined_contexts.append(combined_context)
+
+            if len(combined_contexts) > 0:
+                combined_contexts = torch.stack(combined_contexts)
+
+                # Store for VAE training
+                self.vae_training_sets[context_key].append(combined_set)
+                self.vae_training_fronts[context_key].append(combined_front)
+                self.vae_training_contexts[context_key].append(combined_contexts)
+
+    def compute_weight_from_solution(self, y, reference_point, context_key):
+        """
+        Compute weight vector from objective values using the scalarization method.
+
+        For Tchebycheff scalarization: w_i = 1/|f_i - r_i| (normalized)
+        For Hypervolume scalarization: w_i = (n_i - f_i) (normalized)
+
+        Args:
+            y: Solution's objective values
+            reference_point: Reference point for this context
+            context_key: Key for the context (used to get nadir point)
+
+        Returns:
+            Computed weight vector
+        """
+        # Check which scalarization method is being used
+        if self.SCALAR == "AT":
+            # Augmented Tchebycheff scalarization uses reference point
+            # For Pareto-optimal solution y, the weights are inversely proportional to |y_i - r_i|
+            diff = y - reference_point
+
+            # Avoid division by zero (where y_i = r_i)
+            diff = torch.clamp(diff, min=1e-6)
+
+            # Compute weights: w_i = 1/|y_i - r_i|
+            weights = 1.0 / diff
+
+        else:
+            # Hypervolume scalarization uses nadir point
+            nadir_point = self.global_nadir_point
+
+            # For Pareto-optimal solution y, the weights are proportional to (n_i - y_i)
+            diff = nadir_point - y
+
+            # Ensure weights are non-negative (nadir should be worse than y, but handle edge cases)
+            diff = torch.clamp(diff, min=1e-6)
+
+            # Compute weights: w_i = (n_i - y_i)
+            weights = diff
+
+        # Normalize weights to sum to 1
+        weights_sum = torch.sum(weights)
+        if weights_sum > 1e-10:
+            weights = weights / weights_sum
+        else:
+            # Fallback to uniform weights
+            weights = torch.ones_like(y) / len(y)
+
+        return weights
+
+    def initialize_or_update_vae(self, iteration, full_training=False):
+        """
+        Initialize a new VAE model or update the existing one.
+
+        Args:
+            iteration: Current iteration number (for naming)
+            full_training: Whether to do full training or incremental update
+        """
+        # Collect training data from all contexts
+        all_X = []
+        all_contexts = []
+
+        for context_key in self.vae_training_sets.keys():
+            if len(self.vae_training_sets[context_key]) > 0:
+                # Get the latest data
+                latest_set = self.vae_training_sets[context_key][-1]
+                latest_contexts = self.vae_training_contexts[context_key][-1]
+
+                all_X.append(latest_set)
+                all_contexts.append(latest_contexts)
+
+        if len(all_X) == 0:
+            print("No training data available for VAE")
+            return
+
+        # Convert lists to tensors
+        X_train = torch.cat(all_X)
+        contexts_train = torch.cat(all_contexts)
+
+        if len(X_train) < self.vae_min_data_points:
+            print(f"Not enough data points for VAE training ({len(X_train)} < {self.vae_min_data_points})")
+            return
+
+        if self.vae_model is None:
+            # Initialize new VAE model
+            self.vae_model = ParetoVAETrainer(
+                input_dim=self.input_dim,
+                output_dim=self.output_dim,
+                latent_dim=self.vae_latent_dim,
+                context_dim=contexts_train.shape[1],  # Context + weights
+                conditional=True,
+                epochs=self.vae_epochs,
+                batch_size=min(self.vae_batch_size, len(X_train)),
+                trainer_id=f"CMOBO_VAE_{iteration}"
+            )
+            full_training = True  # Always do full training for new model
+
+        if full_training:
+            # Full training
+            self.vae_model.train(X=X_train, contexts=contexts_train)
+            print(f"VAE fully trained at iteration {iteration} with {len(X_train)} points")
+        else:
+            # Incremental training
+            original_epochs = self.vae_model.epochs
+            self.vae_model.epochs = min(10, original_epochs // 3)  # Use fewer epochs for incremental updates
+            self.vae_model.train(X=X_train, contexts=contexts_train)
+            self.vae_model.epochs = original_epochs  # Restore original setting
+            print(f"VAE incrementally updated at iteration {iteration} with {len(X_train)} points")
+
+    def generate_cvae_candidates(self, context, weight_vector, num_samples=500):
+        """
+        Generate candidate solutions by sampling from the latent space.
+        Optimized for batch evaluation with acquisition functions.
+
+        Args:
+            context: Context vector
+            weight_vector: Current weight vector
+            num_samples: Number of samples to generate
+
+        Returns:
+            Tensor of candidate solutions and their full inputs with context
+        """
+        if self.vae_model is None:
+            return None, None
+
+        # Combine context and weight vector
+        combined_context = torch.cat([context[1:], weight_vector])
+
+        # Sample latent vectors directly
+        latent_dim = self.vae_model.latent_dim
+        z_samples = torch.randn(num_samples, latent_dim).to(self.vae_model.device)
+
+        # Create batch of identical contexts
+        context_batch = combined_context.unsqueeze(0).expand(num_samples, -1)
+
+        # Generate solutions by decoding the latent vectors
+        candidates = self.vae_model.model.inference(z_samples, context_batch)
+
+        # Prepare full inputs including context for acquisition function evaluation
+        full_candidates = []
+        for candidate in candidates:
+            full_candidate = torch.cat([candidate, context])
+            full_candidates.append(full_candidate)
+
+        full_candidates = torch.stack(full_candidates)
+
+        return candidates.detach(), full_candidates.detach()
+
+    def optimize(
+            self,
+            X_train: torch.Tensor,
+            Y_train: torch.Tensor,
+            contexts: torch.Tensor,
+            n_iter: int = 50,
+            beta: float = 1.0,
+            run: int = 0,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Override the optimize method to incorporate VAE capabilities.
+        """
+        self.contexts = contexts
+        self.base_beta = beta
+
+        n_contexts = contexts.shape[0]
+        base_dir_name = f"VAE_CMOBO_{self.input_dim}_{self.output_dim}_{self.model_type}"
+        self.initialize_monitors(n_contexts, base_dir_name)
+        log_sampled_points = self._sample_points(10000, self.input_dim, 0)
+
+        if self.USE_NOISE:
+            Y_train_noise = Y_train + 0.01 * torch.randn_like(Y_train)
+        else:
+            Y_train_noise = None  # Explicitly set to None if not using noise
+
+        # the update_pareto_front function requires this function call
+        # so that the global ref point and nadir point can be obtained
+        self._update_global_reference_and_nadir_points(Y_train)
+        # Initialize tracking for each context
+        for context in contexts:
+            context_mask = torch.all(X_train[:, self.input_dim:] == context, dim=1)
+            if torch.any(context_mask):
+                Y_context = Y_train[context_mask]
+                X_context = X_train[context_mask][:, :self.input_dim]
+                self._update_pareto_front_for_context(X_context, Y_context, context)
+
+        for iteration in range(n_iter):
+            self._update_beta(iteration)
+            # Generate random weights
+            weights = self._generate_weight_vector(self.output_dim)
+
+            # Train models for each objective
+            predictions = []
+            if iteration % 1 == 0:
+                for i, bo_model in enumerate(self.bo_models):
+                    if self.USE_NOISE:
+                        X_norm, y_norm = bo_model.normalize_data(
+                            X_train.clone(),
+                            Y_train_noise[:, i].clone()
+                        )
+                    else:
+                        X_norm, y_norm = bo_model.normalize_data(
+                            X_train.clone(),
+                            Y_train[:, i].clone()
+                        )
+
+                    if iteration > 60:
+                        model = bo_model.build_model(X_norm, y_norm, True)
+                    else:
+                        model = bo_model.build_model(X_norm, y_norm, False)
+                    model.train()
+                    bo_model.likelihood.train()
+
+                    # Training loop (same as before)
+                    optimizer = torch.optim.Adam(model.parameters(),
+                                                 lr=0.1) if bo_model.optimizer_type == 'adam' else FullBatchLBFGS(
+                        model.parameters())
+
+                    scheduler = torch.optim.lr_scheduler.MultiStepLR(
+                        optimizer,
+                        milestones=[int(self.new_train_steps * 0.5), int(self.new_train_steps * 0.75)],
+                        gamma=0.1
+                    )
+
+                    # Definition of likelihood
+                    if bo_model.model_type == 'SVGP':
+                        mll = gpytorch.mlls.VariationalELBO(
+                            bo_model.likelihood,
+                            model,
+                            num_data=y_norm.size(0)
+                        )
+                    else:
+                        mll = gpytorch.mlls.ExactMarginalLogLikelihood(
+                            bo_model.likelihood,
+                            model
+                        )
+
+                    # Training Loop
+                    if bo_model.optimizer_type == 'lbfgs':
+                        def closure():
+                            optimizer.zero_grad()
+                            output = model(X_norm)
+                            loss = -mll(output, y_norm)
+                            return loss
+
+                        prev_loss = float('inf')
+                        loss = closure()
+                        loss.backward()
+                        for dummy_range in range(60):
+                            options = {'closure': closure, 'current_loss': loss, 'max_ls': 10}
+                            loss, _, lr, _, F_eval, G_eval, _, _ = optimizer.step(options)
+
+                    else:
+                        prev_loss = float('inf')
+                        for _ in range(bo_model.train_steps):
+                            optimizer.zero_grad()
+                            output = model(X_norm)
+                            loss = -mll(output, y_norm)
+                            loss.backward()
+                            optimizer.step()
+                            scheduler.step()
+                            prev_loss = loss.item()
+
+                            if _ % 100 == 0:
+                                print(f"Current loss is {prev_loss}")
+
+                    bo_model.model = model
+                    predictions.append({"model": model, "likelihood": bo_model.likelihood})
+                    for context_id, context in enumerate(contexts):
+                        cur_monitor = self.monitors[context_id]
+                        cur_monitor.log_kernel_params(model, i + 1, iteration)
+                        temp_log_sampled_points = torch.cat([log_sampled_points,
+                                                             context.unsqueeze(0).expand(log_sampled_points.shape[0],
+                                                                                         -1)],
+                                                            dim=1)
+                        norm_log_sampled_points = (temp_log_sampled_points - self.bo_models[0].x_mean) / self.bo_models[
+                            0].x_std
+                        Y_sampled_points = self.objective_func.evaluate(temp_log_sampled_points)[:, i]
+                        norm_Y_sampled_points = (Y_sampled_points - self.bo_models[i].y_mean) / self.bo_models[i].y_std
+                        cur_monitor.log_predictions(model,
+                                                    bo_model.likelihood,
+                                                    norm_log_sampled_points,
+                                                    norm_Y_sampled_points,
+                                                    iteration,
+                                                    i + 1)
+
+                self._update_global_reference_and_nadir_points(Y_train)
+
+                for context_id, context in enumerate(contexts):
+                    context_mask = torch.all(X_train[:, self.input_dim:] == context, dim=1)
+                    if torch.any(context_mask):
+                        if self.USE_NOISE:
+                            Y_context = Y_train_noise[context_mask]
+                        else:
+                            Y_context = Y_train[context_mask]
+                        self._update_context_reference_and_nadir_points(context, Y_context)
+
+            if len(predictions) > 0:
+                self.predictions = predictions
+            else:
+                predictions = self.predictions
+
+            for context_id, context in enumerate(contexts):
+                # Log acquisition function values
+                cur_monitor = self.monitors[context_id]
+                temp_log_sampled_points = torch.cat([log_sampled_points,
+                                                     context.unsqueeze(0).expand(log_sampled_points.shape[0], -1)],
+                                                    dim=1)
+                norm_log_sampled_points = (temp_log_sampled_points - self.bo_models[0].x_mean) / self.bo_models[0].x_std
+                acq_values = self._compute_acquisition_batch(predictions, norm_log_sampled_points, self.beta, weights,
+                                                             context)
+                cur_monitor.log_acquisition_values(acq_values, iteration)
+
+            # Train or update VAE model if it's time
+            if (iteration % self.vae_training_frequency == 0 and
+                    sum(len(front[-1]) if len(front) > 0 else 0
+                        for front in self.vae_training_sets.values()) >= self.vae_min_data_points):
+                # Do full training periodically or incremental otherwise
+                # full_training = (self.vae_model is None or
+                #                  iteration % (self.vae_training_frequency * 2) == 0)
+                full_training = True
+                self.initialize_or_update_vae(run, full_training)
+
+            # Optimize for each context
+            next_points = []
+            next_values = []
+            next_values_noise = []
+
+            for context in contexts:
+                context_key = tuple(context.numpy())
+
+                # Set up scalarization function
+                if self.SCALAR == "AT":
+                    if self.IF_GLOBAL:
+                        self.scalarization = AugmentedTchebycheff(
+                            reference_point=self.global_reference_point,
+                            rho=self.rho
+                        )
+                    else:
+                        self.scalarization = AugmentedTchebycheff(
+                            reference_point=self.current_reference_points[context_key],
+                            rho=self.rho
+                        )
+                else:
+                    if self.IF_GLOBAL:
+                        self.scalarization = HypervolumeScalarization(
+                            nadir_point=self.global_nadir_point,
+                            exponent=self.output_dim
+                        )
+                    else:
+                        self.scalarization = HypervolumeScalarization(
+                            nadir_point=self.current_nadir_points[context_key],
+                            exponent=self.output_dim
+                        )
+
+                # Decide whether to use VAE-generated candidates or traditional acquisition
+                use_vae = (self.vae_model is not None and
+                           iteration >= self.vae_training_frequency and
+                           iteration % self.vae_training_frequency == 0)  # Use VAE every other iteration
+
+                if use_vae:
+                    # Generate candidates using VAE with latent perturbation
+                    cvae_candidates, full_candidates = self.generate_cvae_candidates(
+                        context=context,
+                        weight_vector=weights,
+                        num_samples=30000
+                    )
+
+                    if cvae_candidates is not None and len(cvae_candidates) > 0:
+                        # For each candidate, evaluate with acquisition function
+                        acq_values = []
+
+                        # Normalize for GP prediction in batch
+                        norm_candidates = (full_candidates - self.bo_models[0].x_mean) / self.bo_models[0].x_std
+
+                        # Evaluate acquisition function in batch
+                        acq_values = self._compute_acquisition_batch(
+                            predictions,
+                            norm_candidates,
+                            self.beta,
+                            weights,
+                            context
+                        )
+
+                        # Find best candidate
+                        best_idx = torch.argmin(torch.tensor(acq_values))
+                        next_x = cvae_candidates[best_idx]
+
+                    else:
+                        # Fall back to traditional acquisition if VAE fails
+                        next_x = optimize_scalarized_acquisition_for_context(
+                            models=predictions,
+                            context=context,
+                            x_dim=self.input_dim,
+                            scalarization_func=self.scalarization,
+                            weights=weights,
+                            beta=beta,
+                            x_mean=self.bo_models[0].x_mean,
+                            x_std=self.bo_models[0].x_std
+                        )
+                else:
+                    # Use traditional acquisition optimization
+                    next_x = optimize_scalarized_acquisition_for_context(
+                        models=predictions,
+                        context=context,
+                        x_dim=self.input_dim,
+                        scalarization_func=self.scalarization,
+                        weights=weights,
+                        beta=beta,
+                        x_mean=self.bo_models[0].x_mean,
+                        x_std=self.bo_models[0].x_std
+                    )
+
+                # Evaluate selected point
+                x_c = torch.cat([next_x, context])
+                next_y = self.objective_func.evaluate(x_c.clone().unsqueeze(0))
+
+                if self.USE_NOISE:
+                    next_y_noise = next_y + 0.01 * torch.randn_like(next_y)
+                    next_values_noise.append(next_y_noise)
+
+                next_points.append(x_c)
+                next_values.append(next_y)
+
+            # Update training data
+            next_points = torch.stack(next_points)
+            next_values = torch.stack(next_values)
+
+            if self.USE_NOISE:
+                next_values_noise = torch.stack(next_values_noise)
+                Y_train_noise = torch.cat([Y_train_noise, next_values_noise.squeeze(1)])
+
+            X_train = torch.cat([X_train, next_points])
+            Y_train = torch.cat([Y_train, next_values.detach().squeeze(1)])
+
+            # Update Pareto fronts for all contexts
+            for context_id, context in enumerate(contexts):
+                context_mask = torch.all(X_train[:, self.input_dim:] == context, dim=1)
+                context_key = tuple(context.numpy())
+                if torch.any(context_mask):
+                    Y_context = Y_train[context_mask]
+                    X_context = X_train[context_mask][:, :self.input_dim]
+                    self._update_pareto_front_for_context(X_context, Y_context, context)
+
+                # Log metrics
+                metrics = {
+                    'hypervolume': self.context_hv[context_key][-1],
+                    'pareto_points': len(self.context_pareto_fronts[context_key][-1])
+                }
+                self.monitors[context_id].log_optimization_metrics(metrics, iteration)
+
+            if iteration % 5 == 0:
+                print(f'Iteration {iteration}/{n_iter}')
+                for context in contexts:
+                    context_key = tuple(context.numpy())
+                    print(f'Context {context_key}:')
+                    print(f'  Hypervolume: {self.context_hv[context_key][-1]:.3f}')
+                    print(f'  Pareto front size: {len(self.context_pareto_fronts[context_key][-1])}')
+                    # print(
+                    #     f'  VAE training data size: {len(self.vae_training_sets[context_key][-1]) if context_key in self.vae_training_sets and len(self.vae_training_sets[context_key]) > 0 else 0}')
+
+                # Add VAE-specific logging
+                # if self.vae_model is not None:
+                #     print(f'VAE model status:')
+                #     print(f'  Latent dimension: {self.vae_model.latent_dim}')
+                #     print(
+                #         f'  Last trained: iteration {(iteration // self.vae_training_frequency) * self.vae_training_frequency}')
+
+        return X_train, Y_train
