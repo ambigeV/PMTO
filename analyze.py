@@ -56,13 +56,13 @@ def process_hypervolumes(all_runs_data):
 def analyze_and_plot_results(base_path, timestamp, n_runs):
     """Analyze and plot results for both MOBO and CMOBO methods."""
     # Load data for both methods
-    timestamp = "{}_{}_{}_{:.2f}_test_hv".format("dtlz1", 5, 2, 0.01)
+    timestamp = "{}_{}_{}_{:.2f}_test_hv".format("dtlz3", 5, 2, 0.01)
     mobo_data = load_run_data(base_path, 'MOBO', timestamp, n_runs)
-    timestamp = "{}_{}_{}_{:.2f}_test".format("dtlz1", 5, 2, 1.00)
-    exact_timestamp = timestamp+"_ExactGP_hv"
+    timestamp = "{}_{}_{}_{:.2f}_test".format("dtlz3", 5, 2, 1.00)
+    exact_timestamp = timestamp + "_CustomGP_hv_constrain"
     cmobo_data_exactgp = load_run_data(base_path, 'CMOBO', exact_timestamp, n_runs)
     ard_timestamp = timestamp + "_CustomGP_hv_constrain"
-    cmobo_data_ardgp = load_run_data(base_path, 'CMOBO', ard_timestamp, n_runs)
+    cmobo_data_ardgp = load_run_data(base_path, 'VAE-CMOBO', ard_timestamp, n_runs)
     # timestamp = "{}_{}_{}_{:.2f}_test_norm".format("dtlz2", 3, 2, 0.80)
 
     if not mobo_data or not cmobo_data_exactgp or not cmobo_data_ardgp:
@@ -116,11 +116,11 @@ def analyze_and_plot_results(base_path, timestamp, n_runs):
         ax.fill_between(x[:cut_size], mobo_mean[:cut_size] - mobo_std[:cut_size], mobo_mean[:cut_size] + mobo_std[:cut_size],
                         alpha=0.2, color='blue')
 
-        # # Plot CMOBO
-        # ax.plot(x[:cut_size], cmobo_mean_exact[:cut_size], label='CMOBO_e', color='red')
-        # ax.fill_between(x[:cut_size], cmobo_mean_exact[:cut_size] - cmobo_std_exact[:cut_size],
-        #                 cmobo_mean_exact[:cut_size] + cmobo_std_exact[:cut_size],
-        #                 alpha=0.2, color='red')
+        # Plot CMOBO
+        ax.plot(x[:cut_size], cmobo_mean_exact[:cut_size], label='CMOBO_e', color='red')
+        ax.fill_between(x[:cut_size], cmobo_mean_exact[:cut_size] - cmobo_std_exact[:cut_size],
+                        cmobo_mean_exact[:cut_size] + cmobo_std_exact[:cut_size],
+                        alpha=0.2, color='red')
 
         # Plot CMOBO
         ax.plot(x[:cut_size], cmobo_mean_ard[:cut_size], label='P-MOBO', color='green')
@@ -143,7 +143,7 @@ def analyze_and_plot_results(base_path, timestamp, n_runs):
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
 
     # Save the comparison plot
-    save_path = Path(base_path) / f'comparison_plot_{timestamp}_hv.png'
+    save_path = Path(base_path) / f'comparison_plot_vae_{timestamp}_hv.png'
     plt.savefig(save_path)
     plt.close()
 
@@ -154,14 +154,14 @@ def analyze_and_plot_results(base_path, timestamp, n_runs):
     mobo_overall_mean = np.mean([np.mean(data, axis=0) for data in mobo_hv_data.values()], axis=0)
     mobo_overall_std = np.mean([np.std(data, axis=0) for data in mobo_hv_data.values()], axis=0)
 
-    # cmobo_overall_mean_exact = np.mean([np.mean(data, axis=0) for data in cmobo_hv_data_exactgp.values()], axis=0)
-    # cmobo_overall_std_exact = np.mean([np.std(data, axis=0) for data in cmobo_hv_data_exactgp.values()], axis=0)
+    cmobo_overall_mean_exact = np.mean([np.mean(data, axis=0) for data in cmobo_hv_data_exactgp.values()], axis=0)
+    cmobo_overall_std_exact = np.mean([np.std(data, axis=0) for data in cmobo_hv_data_exactgp.values()], axis=0)
 
     cmobo_overall_mean_ard = np.mean([np.mean(data, axis=0) for data in cmobo_hv_data_ardgp.values()], axis=0)
     cmobo_overall_std_ard = np.mean([np.std(data, axis=0) for data in cmobo_hv_data_ardgp.values()], axis=0)
 
     x = np.arange(len(mobo_overall_mean))
-    # y = np.arange(len(cmobo_overall_mean_exact))
+    y = np.arange(len(cmobo_overall_mean_exact))
     z = np.arange(len(cmobo_overall_mean_ard))
 
     plt.plot(x[:cut_size], mobo_overall_mean[:cut_size], label='MOBO', color='blue')
@@ -169,17 +169,17 @@ def analyze_and_plot_results(base_path, timestamp, n_runs):
                      (mobo_overall_mean + mobo_overall_std)[:cut_size],
                      alpha=0.2, color='blue')
 
-    # plt.plot(y[:cut_size], cmobo_overall_mean_exact[:cut_size], label='CMOBO_e', color='red')
-    # plt.fill_between(y[:cut_size], (cmobo_overall_mean_exact - cmobo_overall_std_exact)[:cut_size],
-    #                  (cmobo_overall_mean_exact + cmobo_overall_std_exact)[:cut_size],
-    #                  alpha=0.2, color='red')
+    plt.plot(y[:cut_size], cmobo_overall_mean_exact[:cut_size], label='P-MOBO', color='red')
+    plt.fill_between(y[:cut_size], (cmobo_overall_mean_exact - cmobo_overall_std_exact)[:cut_size],
+                     (cmobo_overall_mean_exact + cmobo_overall_std_exact)[:cut_size],
+                     alpha=0.2, color='red')
 
-    plt.plot(z[:cut_size], cmobo_overall_mean_ard[:cut_size], label='P-MOBO', color='green')
+    plt.plot(z[:cut_size], cmobo_overall_mean_ard[:cut_size], label='P-MOBO-VAE', color='green')
     plt.fill_between(z[:cut_size], (cmobo_overall_mean_ard - cmobo_overall_std_ard)[:cut_size],
                      (cmobo_overall_mean_ard + cmobo_overall_std_ard)[:cut_size],
                      alpha=0.2, color='green')
 
-    plt.title('Average Hypervolume Progress Across All Contexts')
+    plt.title('Average Hypervolume Progress Across All Tasks')
     plt.xlabel('Iteration')
     plt.ylabel('Average Hypervolume')
     plt.legend()
@@ -187,7 +187,7 @@ def analyze_and_plot_results(base_path, timestamp, n_runs):
 
     timestamp = timestamp + "_clean"
     # Save the summary plot
-    summary_save_path = Path(base_path) / f'summary_comparison_plot_{timestamp}_hv.png'
+    summary_save_path = Path(base_path) / f'summary_comparison_plot_vae_{timestamp}_hv.png'
     plt.savefig(summary_save_path)
     plt.close()
 
@@ -197,10 +197,10 @@ def analyze_and_plot_results(base_path, timestamp, n_runs):
             'final_mean_hv': float(mobo_overall_mean[cut_size - 1]),
             'final_std_hv': float(mobo_overall_std[cut_size - 1])
         },
-        # 'cmobo_e': {
-        #     'final_mean_hv': float(cmobo_overall_mean_exact[cut_size - 1]),
-        #     'final_std_hv': float(cmobo_overall_std_exact[cut_size - 1])
-        # },
+        'cmobo_e': {
+            'final_mean_hv': float(cmobo_overall_mean_exact[cut_size - 1]),
+            'final_std_hv': float(cmobo_overall_std_exact[cut_size - 1])
+        },
         'cmobo_r': {
             'final_mean_hv': float(cmobo_overall_mean_ard[cut_size - 1]),
             'final_std_hv': float(cmobo_overall_std_ard[cut_size - 1])
@@ -232,9 +232,9 @@ if __name__ == "__main__":
         print("\nMOBO:")
         print(f"Final Mean HV: {stats['mobo']['final_mean_hv']:.4f}")
         print(f"Final Std HV: {stats['mobo']['final_std_hv']:.4f}")
-        # print("\nCMOBO-e:")
-        # print(f"Final Mean HV: {stats['cmobo_e']['final_mean_hv']:.4f}")
-        # print(f"Final Std HV: {stats['cmobo_e']['final_std_hv']:.4f}")
+        print("\nCMOBO-e:")
+        print(f"Final Mean HV: {stats['cmobo_e']['final_mean_hv']:.4f}")
+        print(f"Final Std HV: {stats['cmobo_e']['final_std_hv']:.4f}")
         print("\nCMOBO-r:")
         print(f"Final Mean HV: {stats['cmobo_r']['final_mean_hv']:.4f}")
         print(f"Final Std HV: {stats['cmobo_r']['final_std_hv']:.4f}")
