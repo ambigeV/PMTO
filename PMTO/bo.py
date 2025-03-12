@@ -17,6 +17,7 @@ from torch.utils.tensorboard import SummaryWriter
 from .LBFGS import FullBatchLBFGS
 # CVAE Model
 from .gen_models import ParetoVAETrainer
+import os
 
 
 IF_PLOT = False
@@ -1634,6 +1635,10 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
         all_X = []
         all_contexts = []
 
+        # Create a TensorBoard writer
+        log_dir = os.path.join(f"./log/{self.base_dir_name}", f"VAE_logs_{iteration}")
+        writer = SummaryWriter(log_dir)
+
         for context_key in self.vae_training_sets.keys():
             if len(self.vae_training_sets[context_key]) > 0:
                 # Get the latest data
@@ -1651,28 +1656,128 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
         X_train = torch.cat(all_X)
         contexts_train = torch.cat(all_contexts)
 
+        # Create a custom callback for the VAE trainer
+        class TensorBoardCallback:
+            def __init__(self, writer, prefix=""):
+                self.writer = writer
+                self.prefix = prefix
+                self.epoch = 0
+
+            def after_epoch(self, epoch, logs):
+                self.epoch = epoch
+                # Log training metrics
+                for key, value in logs.items():
+                    self.writer.add_scalar(f"{self.prefix}/{key}", value, epoch)
+
+            def after_batch(self, batch_idx, logs):
+                # Log batch-level metrics
+                for key, value in logs.items():
+                    self.writer.add_scalar(f"{self.prefix}/batch_{key}", value,
+                                           self.epoch * batch_idx)
+
+            def log_gradients(self, grad_stats):
+                # Log gradient statistics
+                for key, value in grad_stats.items():
+                    self.writer.add_scalar(f"{self.prefix}/grad_{key}", value, self.epoch)
+
+        # Instantiate callback
+        tensorboard_callback = TensorBoardCallback(writer, prefix="VAE_training")
+
         if len(X_train) < self.vae_min_data_points:
             print(f"Not enough data points for VAE training ({len(X_train)} < {self.vae_min_data_points})")
             return
 
-        if self.vae_model is None:
+        # if self.vae_model is None:
             # Initialize new VAE model
-            self.vae_model = ParetoVAETrainer(
-                input_dim=self.input_dim,
-                output_dim=self.output_dim,
-                latent_dim=self.vae_latent_dim,
-                context_dim=contexts_train.shape[1],  # Context + weights
-                conditional=True,
-                epochs=self.vae_epochs,
-                batch_size=min(self.vae_batch_size, len(X_train)),
-                trainer_id=f"CMOBO_VAE_{iteration}"
-            )
-            full_training = True  # Always do full training for new model
+        self.vae_model = ParetoVAETrainer(
+            input_dim=self.input_dim,
+            output_dim=self.output_dim,
+            latent_dim=self.vae_latent_dim,
+            context_dim=contexts_train.shape[1],  # Context + weights
+            conditional=True,
+            epochs=self.vae_epochs,
+            batch_size=min(self.vae_batch_size, len(X_train)),
+            trainer_id=f"CMOBO_VAE_{iteration}"
+        )
+        full_training = True  # Always do full training for new model
+
+        # Extend the ParetoVAETrainer train method to use our callback
+        def train_with_callback(vae_model, X, contexts, callback=None):
+            """Wraps the original train method to add callback functionality"""
+            data_loader = vae_model.prepare_data(X=X, contexts=contexts)
+
+            for epoch in range(vae_model.epochs):
+                epoch_loss = 0
+                epoch_mse = 0
+                epoch_kld = 0
+
+                for iteration_inner, batch in enumerate(data_loader):
+                    # Process batch (simplified, actual implementation in ParetoVAETrainer)
+                    if vae_model.conditional:
+                        x, c = batch
+                        x, c = x.to(vae_model.device), c.to(vae_model.device)
+                        recon_x, mean, log_var, z = vae_model.model(x, c)
+                    else:
+                        x = batch[0].to(vae_model.device)
+                        c = None
+                        recon_x, mean, log_var, z = vae_model.model(x)
+
+                    # Calculate loss
+                    loss, mse, kld = vae_model.loss_fn(recon_x, x, mean, log_var)
+
+                    # Backward pass
+                    vae_model.optimizer.zero_grad()
+                    loss.backward()
+
+                    # Monitor gradients
+                    if callback and iteration_inner % max(1, len(data_loader) // 5) == 0:
+                        grad_total, grad_max, grad_min = vae_model.monitor_gradients(epoch, iteration_inner)
+                        callback.log_gradients({
+                            'total_norm': grad_total,
+                            'max_norm': grad_max,
+                            'min_norm': grad_min
+                        })
+
+                    vae_model.optimizer.step()
+                    vae_model.scheduler.step()
+
+                    # Track batch results
+                    if callback:
+                        callback.after_batch(iteration_inner, {
+                            'loss': loss.item(),
+                            'mse': mse.item(),
+                            'kld': kld.item()
+                        })
+
+                    # Track epoch results
+                    epoch_loss += loss.item()
+                    epoch_mse += mse.item()
+                    epoch_kld += kld.item()
+
+                # End of epoch - log metrics
+                avg_loss = epoch_loss / len(data_loader)
+                vae_model.logs['loss'].append(avg_loss)
+                vae_model.logs['mse'].append(epoch_mse / len(data_loader))
+                vae_model.logs['kld'].append(epoch_kld / len(data_loader))
+
+                if callback:
+                    callback.after_epoch(epoch, {
+                        'loss': avg_loss,
+                        'mse': epoch_mse / len(data_loader),
+                        'kld': epoch_kld / len(data_loader)
+                    })
+
+                print(f"Epoch {epoch + 1}/{vae_model.epochs} completed, Avg Loss: {avg_loss:.4f}")
+
+            return vae_model.logs
 
         if full_training:
             # Full training
-            self.vae_model.train(X=X_train, contexts=contexts_train)
+            # self.vae_model.train(X=X_train, contexts=contexts_train)
+            # print(f"VAE fully trained at iteration {iteration} with {len(X_train)} points")
+            train_with_callback(self.vae_model, X_train, contexts_train, tensorboard_callback)
             print(f"VAE fully trained at iteration {iteration} with {len(X_train)} points")
+
         else:
             # Incremental training
             original_epochs = self.vae_model.epochs
@@ -1707,8 +1812,9 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
         # Create batch of identical contexts
         context_batch = combined_context.unsqueeze(0).expand(num_samples, -1)
 
-        # Generate solutions by decoding the latent vectors
-        candidates = self.vae_model.model.inference(z_samples, context_batch)
+        with torch.no_grad():
+            # Generate solutions by decoding the latent vectors
+            candidates = self.vae_model.model.inference(z_samples, context_batch)
 
         # Prepare full inputs including context for acquisition function evaluation
         full_candidates = []
@@ -1736,8 +1842,8 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
         self.base_beta = beta
 
         n_contexts = contexts.shape[0]
-        base_dir_name = f"VAE_CMOBO_{self.input_dim}_{self.output_dim}_{self.model_type}"
-        self.initialize_monitors(n_contexts, base_dir_name)
+        self.base_dir_name = f"VAE_CMOBO_{self.input_dim}_{self.output_dim}_{self.model_type}"
+        self.initialize_monitors(n_contexts, self.base_dir_name)
         log_sampled_points = self._sample_points(10000, self.input_dim, 0)
 
         if self.USE_NOISE:
@@ -1891,7 +1997,7 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
                 # full_training = (self.vae_model is None or
                 #                  iteration % (self.vae_training_frequency * 2) == 0)
                 full_training = True
-                self.initialize_or_update_vae(run, full_training)
+                self.initialize_or_update_vae(iteration, full_training)
 
             # Optimize for each context
             next_points = []

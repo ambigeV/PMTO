@@ -490,7 +490,7 @@ def vae_optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objec
         # Initialize the optimizer
         optimizer = VAEEnhancedCMOBO(
             objective_func=obj_func,
-            model_type = model_type
+            model_type=model_type
         )
 
         # Generate initial points

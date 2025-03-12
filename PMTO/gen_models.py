@@ -195,6 +195,53 @@ class ParetoVAETrainer:
         # Training logs
         self.logs = defaultdict(list)
 
+    def monitor_gradients(self, epoch=0, iteration=0):
+        """Monitor gradients to detect exploding or vanishing issues"""
+        # Calculate and store gradient norms
+        total_norm = 0
+        max_norm = 0
+        min_norm = float('inf')
+        layer_norms = {}
+
+        for name, param in self.model.named_parameters():
+            if param.grad is not None:
+                param_norm = param.grad.data.norm(2).item()
+                total_norm += param_norm ** 2
+
+                max_norm = max(max_norm, param_norm)
+                min_norm = min(min_norm, param_norm if param_norm > 0 else float('inf'))
+                layer_norms[name] = param_norm
+
+        total_norm = total_norm ** 0.5
+
+        # Store in logs
+        if 'grad_norm' not in self.logs:
+            self.logs['grad_norm'] = []
+        if 'max_grad' not in self.logs:
+            self.logs['max_grad'] = []
+        if 'min_grad' not in self.logs:
+            self.logs['min_grad'] = []
+
+        self.logs['grad_norm'].append(total_norm)
+        self.logs['max_grad'].append(max_norm)
+        self.logs['min_grad'].append(min_norm)
+
+        # Detect issues
+        if total_norm > 10.0:  # Threshold for exploding gradients
+            print(f"WARNING: Potential exploding gradient detected at epoch {epoch}, iteration {iteration}")
+            print(f"Total gradient norm: {total_norm:.4f}")
+            # Print top 3 layers with largest gradients
+            top_layers = sorted(layer_norms.items(), key=lambda x: x[1], reverse=True)[:3]
+            print("Largest gradient layers:")
+            for name, norm in top_layers:
+                print(f"  {name}: {norm:.4f}")
+
+        if max_norm < 1e-4:  # Threshold for vanishing gradients
+            print(f"WARNING: Potential vanishing gradient detected at epoch {epoch}, iteration {iteration}")
+            print(f"Maximum gradient norm: {max_norm:.8f}")
+
+        return total_norm, max_norm, min_norm
+
     def loss_fn(self, recon_x, x, mean, log_var):
         """
         VAE loss function combining reconstruction loss and KL divergence.
@@ -215,7 +262,7 @@ class ParetoVAETrainer:
         # KL divergence
         KLD = -0.5 * torch.sum(1 + log_var - mean.pow(2) - log_var.exp())
 
-        return (MSE + KLD) / x.size(0)
+        return (MSE + KLD) / x.size(0), MSE / x.size(0), KLD / x.size(0)
 
     def prepare_data(self, X, Y=None, contexts=None):
         """
@@ -270,6 +317,8 @@ class ParetoVAETrainer:
 
         for epoch in range(self.epochs):
             epoch_loss = 0
+            epoch_mse = 0
+            epoch_kld = 0
 
             # For visualization of latent space
             latent_points = []
@@ -292,16 +341,21 @@ class ParetoVAETrainer:
                     recon_x, mean, log_var, z = self.model(x)
 
                 # Calculate loss
-                loss = self.loss_fn(recon_x, x, mean, log_var)
+                loss, mse, kld = self.loss_fn(recon_x, x, mean, log_var)
 
                 # Backward pass
                 self.optimizer.zero_grad()
                 loss.backward()
+                # Monitor gradients
+                if (iteration + 1) % max(1, len(data_loader) // 5) == 0:
+                    grad_total, grad_max, grad_min = self.monitor_gradients(epoch, iteration)
                 self.optimizer.step()
                 self.scheduler.step()
 
                 # Track results
                 epoch_loss += loss.item()
+                epoch_mse += mse.item()
+                epoch_kld += kld.item()
 
                 # Store latent points for visualization
                 latent_points.append(z.detach().cpu().numpy())
@@ -314,8 +368,11 @@ class ParetoVAETrainer:
                           f"Loss: {loss.item():.4f}")
 
             # End of epoch
+
             avg_loss = epoch_loss / len(data_loader)
             self.logs['loss'].append(avg_loss)
+            self.logs['mse'].append(epoch_mse / len(data_loader))
+            self.logs['kld'].append(epoch_kld / len(data_loader))
             print(f"Epoch {epoch + 1}/{self.epochs} completed, Avg Loss: {avg_loss:.4f}")
 
             # Visualize results periodically
@@ -323,6 +380,19 @@ class ParetoVAETrainer:
             #     self._visualize_results(epoch, latent_points, latent_contexts)
 
         return self.logs
+
+    def validate(self, X_val, contexts_val=None):
+        """Compute validation loss"""
+        self.model.eval()
+        with torch.no_grad():
+            if self.conditional:
+                recon_x, mean, log_var, _ = self.model(X_val, contexts_val)
+            else:
+                recon_x, mean, log_var, _ = self.model(X_val)
+
+            loss, mse, kld = self.loss_fn(recon_x, X_val, mean, log_var)
+
+        return loss.item(), mse.item(), kld.item()
 
     def _visualize_results(self, epoch, latent_points, latent_contexts=None):
         """
