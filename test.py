@@ -529,7 +529,7 @@ def vae_optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objec
                 print(f"Run {run + 1}, Context {i}: No Pareto front found")
 
         # Save individual run data
-        save_path = f'result/VAE-CMOBO_optimization_history_{timestamp}_run_{run}.pth'
+        save_path = f'result/betaVAE-CMOBO_optimization_history_{timestamp}_run_{run}.pth'
         torch.save(run_data, save_path)
         print(f"Run {run + 1} data saved to {save_path}")
 
@@ -553,7 +553,7 @@ def vae_optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objec
             ax.legend()
 
         plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-        plt.savefig(f'result/VAE-CMOBO_hypervolume_history_grid_{timestamp}_run_{run}.png')
+        plt.savefig(f'result/betaVAE-CMOBO_hypervolume_history_grid_{timestamp}_run_{run}.png')
         plt.close()
 
 

@@ -144,7 +144,7 @@ class ParetoVAETrainer:
                  latent_dim=2,  # Dimension of latent space
                  context_dim=0,  # Dimension of context variables
                  conditional=False,  # Whether to use conditional VAE
-                 learning_rate=0.001,
+                 learning_rate=0.1,
                  batch_size=64,
                  epochs=100,
                  device=None,
@@ -261,8 +261,9 @@ class ParetoVAETrainer:
 
         # KL divergence
         KLD = -0.5 * torch.sum(1 + log_var - mean.pow(2) - log_var.exp())
+        beta = 1
 
-        return (MSE + KLD) / x.size(0), MSE / x.size(0), KLD / x.size(0)
+        return (MSE + beta * KLD) / x.size(0), MSE / x.size(0), KLD / x.size(0)
 
     def prepare_data(self, X, Y=None, contexts=None):
         """

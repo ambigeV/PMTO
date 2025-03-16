@@ -1636,7 +1636,7 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
         all_contexts = []
 
         # Create a TensorBoard writer
-        log_dir = os.path.join(f"./log/{self.base_dir_name}", f"VAE_logs_{iteration}")
+        log_dir = os.path.join(f"./log/{self.base_dir_name}", f"beta_VAE_logs_{iteration}")
         writer = SummaryWriter(log_dir)
 
         for context_key in self.vae_training_sets.keys():
@@ -1773,10 +1773,10 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
 
         if full_training:
             # Full training
-            # self.vae_model.train(X=X_train, contexts=contexts_train)
-            # print(f"VAE fully trained at iteration {iteration} with {len(X_train)} points")
-            train_with_callback(self.vae_model, X_train, contexts_train, tensorboard_callback)
+            self.vae_model.train(X=X_train, contexts=contexts_train)
             print(f"VAE fully trained at iteration {iteration} with {len(X_train)} points")
+            # train_with_callback(self.vae_model, X_train, contexts_train, tensorboard_callback)
+            # print(f"VAE fully trained at iteration {iteration} with {len(X_train)} points")
 
         else:
             # Incremental training
@@ -1842,7 +1842,7 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
         self.base_beta = beta
 
         n_contexts = contexts.shape[0]
-        self.base_dir_name = f"VAE_CMOBO_{self.input_dim}_{self.output_dim}_{self.model_type}"
+        self.base_dir_name = f"VAE_CMOBO_dtlz1_{self.input_dim}_{self.output_dim}_{self.model_type}"
         self.initialize_monitors(n_contexts, self.base_dir_name)
         log_sampled_points = self._sample_points(10000, self.input_dim, 0)
 
