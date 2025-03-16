@@ -1496,11 +1496,27 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
         self.vae_training_fronts = {}
         self.vae_training_contexts = {}
 
+        # Store all the available training data so far
+        self.X_train = None
+        self.Y_train = None
+
     def _update_pareto_front_for_context(self, X: torch.Tensor, Y: torch.Tensor, context: torch.Tensor):
         """
         Override the parent method to additionally collect rank-1 and rank-2 solutions for VAE training.
         """
         context_key = tuple(context.numpy())
+
+        # Create scalarization function based on this weight
+        if self.SCALAR == "AT":
+            scalarization = AugmentedTchebycheff(
+                reference_point=self.global_reference_point,
+                rho=self.rho
+            )
+        else:
+            scalarization = HypervolumeScalarization(
+                nadir_point=self.global_nadir_point,
+                exponent=self.output_dim
+            )
 
         # Convert to numpy for pymoo
         Y_np = Y.numpy()
@@ -1557,21 +1573,49 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
         if len(combined_set) > 0:
             # Compute weight vectors for each solution
             reference_point = self.global_reference_point
+            top_p = 0.2
+            context_mask = torch.all(self.X_train[:, self.input_dim:] == context, dim=1)
             combined_contexts = []
+            augmented_vae_sets = []
+            augmented_vae_fronts = []
+            augmented_contexts = []
+
+            all_X_context = self.X_train[context_mask][:, :self.input_dim]
+            all_Y_context = self.Y_train[context_mask]
 
             for y_value in combined_front:
                 weight = self.compute_weight_from_solution(y_value, reference_point, context_key)
+
+                scalarized_values = scalarization(all_Y_context, weight)
+                # Find the indices of the top p% solutions according to this weight vector
+                num_to_select = max(1, int(len(scalarized_values) * top_p))
+                _, top_indices = torch.topk(scalarized_values, num_to_select, largest=False)
                 # Combine context and weight for VAE conditioning
                 combined_context = torch.cat([context[1:], weight])
+
                 combined_contexts.append(combined_context)
 
-            if len(combined_contexts) > 0:
-                combined_contexts = torch.stack(combined_contexts)
+                # Efficiently select solutions and replicate contexts in one shot
+                selected_X = all_X_context[top_indices]
+                selected_Y = all_Y_context[top_indices]
+
+                # Replicate the context for each selected solution
+                replicated_context = combined_context.unsqueeze(0).expand(num_to_select, -1)
+
+                # Add to our lists
+                augmented_vae_sets.append(selected_X)
+                augmented_vae_fronts.append(selected_Y)
+                augmented_contexts.append(replicated_context)
+
+            if len(augmented_vae_sets) > 0:
+                augmented_vae_sets = torch.cat(augmented_vae_sets, dim=0)
+                augmented_vae_fronts = torch.cat(augmented_vae_fronts, dim=0)
+                augmented_contexts = torch.cat(augmented_contexts, dim=0)
 
                 # Store for VAE training
-                self.vae_training_sets[context_key].append(combined_set)
-                self.vae_training_fronts[context_key].append(combined_front)
-                self.vae_training_contexts[context_key].append(combined_contexts)
+                self.vae_training_sets[context_key].append(augmented_vae_sets)
+                self.vae_training_fronts[context_key].append(augmented_vae_fronts)
+                self.vae_training_contexts[context_key].append(augmented_contexts)
 
     def compute_weight_from_solution(self, y, reference_point, context_key):
         """
@@ -1689,17 +1733,20 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
 
         # if self.vae_model is None:
             # Initialize new VAE model
-        self.vae_model = ParetoVAETrainer(
-            input_dim=self.input_dim,
-            output_dim=self.output_dim,
-            latent_dim=self.vae_latent_dim,
-            context_dim=contexts_train.shape[1],  # Context + weights
-            conditional=True,
-            epochs=self.vae_epochs,
-            batch_size=min(self.vae_batch_size, len(X_train)),
-            trainer_id=f"CMOBO_VAE_{iteration}"
-        )
-        full_training = True  # Always do full training for new model
+        if self.vae_model is None:
+            self.vae_model = ParetoVAETrainer(
+                input_dim=self.input_dim,
+                output_dim=self.output_dim,
+                latent_dim=self.vae_latent_dim,
+                context_dim=contexts_train.shape[1],  # Context + weights
+                conditional=True,
+                epochs=self.vae_epochs,
+                batch_size=min(self.vae_batch_size, len(X_train)),
+                trainer_id=f"CMOBO_VAE_{iteration}"
+            )
+            full_training = True  # Always do full training for new model
+        else:
+            full_training = False
 
         # Extend the ParetoVAETrainer train method to use our callback
         def train_with_callback(vae_model, X, contexts, callback=None):
@@ -1781,7 +1828,7 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
         else:
             # Incremental training
             original_epochs = self.vae_model.epochs
-            self.vae_model.epochs = min(10, original_epochs // 3)  # Use fewer epochs for incremental updates
+            # self.vae_model.epochs = min(10, original_epochs // 3)  # Use fewer epochs for incremental updates
             self.vae_model.train(X=X_train, contexts=contexts_train)
             self.vae_model.epochs = original_epochs  # Restore original setting
             print(f"VAE incrementally updated at iteration {iteration} with {len(X_train)} points")
@@ -1840,6 +1887,8 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
         """
         self.contexts = contexts
         self.base_beta = beta
+        self.X_train = X_train.clone()
+        self.Y_train = Y_train.clone()
 
         n_contexts = contexts.shape[0]
         self.base_dir_name = f"VAE_CMOBO_dtlz1_{self.input_dim}_{self.output_dim}_{self.model_type}"
@@ -2110,6 +2159,8 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
 
             X_train = torch.cat([X_train, next_points])
             Y_train = torch.cat([Y_train, next_values.detach().squeeze(1)])
+            self.X_train = X_train.clone()
+            self.Y_train = Y_train.clone()
 
             # Update Pareto fronts for all contexts
             for context_id, context in enumerate(contexts):
