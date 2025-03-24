@@ -396,7 +396,7 @@ def optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objective
         )
 
         # Generate initial points
-        n_initial_points = 5
+        n_initial_points = 20
         X_init = torch.zeros(n_initial_points * n_contexts, obj_func.input_dim + obj_func.context_dim)
         for i in range(n_contexts):
             start_idx = i * n_initial_points
@@ -431,7 +431,7 @@ def optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objective
                 print(f"Run {run + 1}, Context {i}: No Pareto front found")
 
         # Save individual run data
-        save_path = f'result/CMOBO_optimization_history_{timestamp}_run_{run}.pth'
+        save_path = f'result/{problem_name}/CMOBO_optimization_history_{timestamp}_run_{run}.pth'
         torch.save(run_data, save_path)
         print(f"Run {run + 1} data saved to {save_path}")
 
@@ -455,7 +455,7 @@ def optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objective
             ax.legend()
 
         plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-        plt.savefig(f'result/CMOBO_hypervolume_history_grid_{timestamp}_run_{run}.png')
+        plt.savefig(f'result/{problem_name}/CMOBO_hypervolume_history_grid_{timestamp}_run_{run}.png')
         plt.close()
 
 
@@ -490,11 +490,12 @@ def vae_optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objec
         # Initialize the optimizer
         optimizer = VAEEnhancedCMOBO(
             objective_func=obj_func,
-            model_type=model_type
+            model_type=model_type,
+            problem_name=problem_name
         )
 
         # Generate initial points
-        n_initial_points = 5
+        n_initial_points = 20
         X_init = torch.zeros(n_initial_points * n_contexts, obj_func.input_dim + obj_func.context_dim)
         for i in range(n_contexts):
             start_idx = i * n_initial_points
@@ -529,7 +530,7 @@ def vae_optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objec
                 print(f"Run {run + 1}, Context {i}: No Pareto front found")
 
         # Save individual run data
-        save_path = f'result/betaVAE-CMOBO_optimization_history_{timestamp}_run_{run}.pth'
+        save_path = f'result/{problem_name}/betaVAE-CMOBO-nosigmoid_aug_2_optimization_history_{timestamp}_run_{run}.pth'
         torch.save(run_data, save_path)
         print(f"Run {run + 1} data saved to {save_path}")
 
@@ -553,7 +554,7 @@ def vae_optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objec
             ax.legend()
 
         plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-        plt.savefig(f'result/betaVAE-CMOBO_hypervolume_history_grid_{timestamp}_run_{run}.png')
+        plt.savefig(f'result/{problem_name}/betaVAE-CMOBO-nosigmoid_aug_2_hypervolume_history_grid_{timestamp}_run_{run}.png')
         plt.close()
 
 
@@ -603,7 +604,7 @@ def run_mobo_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2,
             )
 
             # Generate initial points for this context
-            n_initial_points = 5
+            n_initial_points = 20
             # X_init = torch.rand(n_initial_points, obj_func.input_dim)
             # sampler = qmc.LatinHypercube(d=obj_func.input_dim)
             # base_sampler = sampler.random(n=n_initial_points)
@@ -625,7 +626,7 @@ def run_mobo_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2,
             }
 
         # Save individual run data
-        save_path = f'result/MOBO_optimization_history_{timestamp}_run_{run}.pth'
+        save_path = f'result/{problem_name}/MOBO_optimization_history_{timestamp}_run_{run}.pth'
         torch.save(run_data, save_path)
         print(f"Run {run} data saved to {save_path}")
 
@@ -648,7 +649,7 @@ def run_mobo_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2,
             ax.legend()
 
         plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-        plt.savefig(f'result/MOBO_hypervolume_history_grid_{timestamp}_run_{run}.png')
+        plt.savefig(f'result/{problem_name}/MOBO_hypervolume_history_grid_{timestamp}_run_{run}.png')
         plt.close()
 
 

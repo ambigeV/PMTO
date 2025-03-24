@@ -118,7 +118,8 @@ class Decoder(torch.nn.Module):
             if i + 1 < len(layer_sizes):
                 self.MLP.add_module(name=f"A{i}", module=torch.nn.ReLU())
             else:
-                self.MLP.add_module(name="sigmoid", module=torch.nn.Sigmoid())
+                pass
+                # self.MLP.add_module(name="sigmoid", module=torch.nn.Sigmoid())
             # No activation in final layer - will be applied in forward method
 
     def forward(self, z, c=None):
@@ -174,8 +175,8 @@ class ParetoVAETrainer:
 
         # Create model architecture
         # Default architecture with reasonable layer sizes
-        encoder_sizes = [input_dim, max(input_dim, 2 * latent_dim, 10)]
-        decoder_sizes = [max(input_dim, 2 * latent_dim, 10), input_dim]
+        encoder_sizes = [input_dim, max(input_dim, 2 * latent_dim, input_dim)]
+        decoder_sizes = [max(input_dim, 2 * latent_dim, input_dim), input_dim]
 
         self.model = VAE(
             encoder_layer_sizes=encoder_sizes,
@@ -261,7 +262,7 @@ class ParetoVAETrainer:
 
         # KL divergence
         KLD = -0.5 * torch.sum(1 + log_var - mean.pow(2) - log_var.exp())
-        beta = 1
+        beta = 0.001
 
         return (MSE + beta * KLD) / x.size(0), MSE / x.size(0), KLD / x.size(0)
 

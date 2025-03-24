@@ -1458,14 +1458,16 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
             optimizer_type: str = 'adam',
             rho: float = 0.001,
             # VAE-specific parameters
-            vae_training_frequency: int = 5,
+            # vae_training_frequency: int = 5,
+            vae_training_frequency: int = 2,
             vae_min_data_points: int = 8,
             vae_latent_dim: Optional[int] = None,
             vae_epochs: int = 50,
             vae_batch_size: int = 32,
             use_noise: bool = False,
             scalar_type: str = "HV",
-            use_global_reference: bool = True
+            use_global_reference: bool = True,
+            problem_name: str = None
     ):
         # Initialize the parent class
         super().__init__(
@@ -1481,10 +1483,11 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
         # VAE-specific parameters
         self.vae_training_frequency = vae_training_frequency
         self.vae_min_data_points = vae_min_data_points
-        self.vae_latent_dim = vae_latent_dim or max(1, self.output_dim - 1)
+        self.vae_latent_dim = vae_latent_dim or max(2, self.output_dim - 1)
         self.vae_epochs = vae_epochs
         self.vae_batch_size = vae_batch_size
         self.vae_model = None
+        self.problem_name = problem_name
 
         # Settings - override global constants with instance variables for cleaner design
         self.USE_NOISE = use_noise
@@ -1573,7 +1576,7 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
         if len(combined_set) > 0:
             # Compute weight vectors for each solution
             reference_point = self.global_reference_point
-            top_p = 0.2
+            top_p = 0.4
             context_mask = torch.all(self.X_train[:, self.input_dim:] == context, dim=1)
             combined_contexts = []
             augmented_vae_sets = []
@@ -1680,7 +1683,7 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
         all_contexts = []
 
         # Create a TensorBoard writer
-        log_dir = os.path.join(f"./log/{self.base_dir_name}", f"beta_VAE_logs_{iteration}")
+        log_dir = os.path.join(f"./log_tier/{self.base_dir_name}", f"beta_VAE_logs_{iteration}")
         writer = SummaryWriter(log_dir)
 
         for context_key in self.vae_training_sets.keys():
@@ -1820,16 +1823,17 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
 
         if full_training:
             # Full training
-            self.vae_model.train(X=X_train, contexts=contexts_train)
+            # self.vae_model.train(X=X_train, contexts=contexts_train)
             print(f"VAE fully trained at iteration {iteration} with {len(X_train)} points")
-            # train_with_callback(self.vae_model, X_train, contexts_train, tensorboard_callback)
+            train_with_callback(self.vae_model, X_train, contexts_train, tensorboard_callback)
             # print(f"VAE fully trained at iteration {iteration} with {len(X_train)} points")
 
         else:
             # Incremental training
             original_epochs = self.vae_model.epochs
-            # self.vae_model.epochs = min(10, original_epochs // 3)  # Use fewer epochs for incremental updates
-            self.vae_model.train(X=X_train, contexts=contexts_train)
+            self.vae_model.epochs = max(10, int(original_epochs * 0.3))  # Use fewer epochs for incremental updates
+            # self.vae_model.train(X=X_train, contexts=contexts_train)
+            train_with_callback(self.vae_model, X_train, contexts_train, tensorboard_callback)
             self.vae_model.epochs = original_epochs  # Restore original setting
             print(f"VAE incrementally updated at iteration {iteration} with {len(X_train)} points")
 
@@ -1891,9 +1895,9 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
         self.Y_train = Y_train.clone()
 
         n_contexts = contexts.shape[0]
-        self.base_dir_name = f"VAE_CMOBO_dtlz1_{self.input_dim}_{self.output_dim}_{self.model_type}"
+        self.base_dir_name = f"VAE_CMOBO_{self.problem_name}_{self.input_dim}_{self.output_dim}_{self.model_type}_{self.vae_training_frequency}_{run}"
         self.initialize_monitors(n_contexts, self.base_dir_name)
-        log_sampled_points = self._sample_points(10000, self.input_dim, 0)
+        log_sampled_points = self._sample_points(30000, self.input_dim, 0)
 
         if self.USE_NOISE:
             Y_train_noise = Y_train + 0.01 * torch.randn_like(Y_train)
@@ -2039,9 +2043,9 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
                 cur_monitor.log_acquisition_values(acq_values, iteration)
 
             # Train or update VAE model if it's time
-            if (iteration % self.vae_training_frequency == 0 and
-                    sum(len(front[-1]) if len(front) > 0 else 0
-                        for front in self.vae_training_sets.values()) >= self.vae_min_data_points):
+            if iteration % self.vae_training_frequency == 0:
+                # sum(len(front[-1]) if len(front) > 0 else 0
+                #     for front in self.vae_training_sets.values()) >= self.vae_min_data_points):`
                 # Do full training periodically or incremental otherwise
                 # full_training = (self.vae_model is None or
                 #                  iteration % (self.vae_training_frequency * 2) == 0)
