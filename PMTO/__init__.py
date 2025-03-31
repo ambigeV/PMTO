@@ -1,5 +1,5 @@
 from .bo import BayesianOptimization, MultiObjectiveBayesianOptimization, \
     ContextualBayesianOptimization, ContextualMultiObjectiveBayesianOptimization, \
-    PseudoObjectiveFunction, VAEEnhancedCMOBO
+    PseudoObjectiveFunction, VAEEnhancedCMOBO, ParEGO, EHVI
 from .objective import ObjectiveFunction, MultiObjectiveFunction, \
     ContextualMultiObjectiveFunction

@@ -6,7 +6,7 @@ import math
 from .models import SVGPModel, ExactGPModel, ArdGPModel, CustomGPModel
 from .acquisition import optimize_acquisition, optimize_scalarized_acquisition, \
     optimize_acquisition_for_context, optimize_scalarized_acquisition_for_context, \
-    ucb_acquisition_group
+    ucb_acquisition_group, expected_improvement, optimize_scalarized_acquisition_ei, optimize_with_ehvi
 from typing import Callable, Optional, Tuple, List, Dict
 from pymoo.indicators.hv import Hypervolume
 from pymoo.util.nds.non_dominated_sorting import NonDominatedSorting
@@ -949,7 +949,6 @@ class MultiObjectiveBayesianOptimization:
                     exponent=self.output_dim
                 )
 
-
             # Optimize acquisition function using scalarization
             next_x = optimize_scalarized_acquisition(
                 models=predictions,
@@ -988,6 +987,368 @@ class MultiObjectiveBayesianOptimization:
 
         self.monitor.close()
 
+        return X_train, Y_train
+
+
+class EHVI(MultiObjectiveBayesianOptimization):
+    """Expected Hypervolume Improvement (EHVI) Implementation
+
+    EHVI directly optimizes the expected improvement in hypervolume
+    using BoTorch's efficient implementation.
+    """
+
+    def __init__(
+            self,
+            objective_func,
+            reference_point=None,
+            inducing_points=None,
+            train_steps=200,
+            model_type='ExactGP',
+            optimizer_type='adam',
+            rho=0.001,
+            mobo_id=None,
+            minimize=True  # Flag to specify minimization problem
+    ):
+        super().__init__(
+            objective_func=objective_func,
+            reference_point=reference_point,
+            inducing_points=inducing_points,
+            train_steps=train_steps,
+            model_type=model_type,
+            optimizer_type=optimizer_type,
+            rho=rho,
+            mobo_id=mobo_id if mobo_id else "EHVI"
+        )
+
+        self.minimize = minimize
+        # Store hypervolume improvement history
+        self.ehvi_history = []
+
+    def optimize(
+            self,
+            X_train: torch.Tensor,
+            Y_train: torch.Tensor,
+            n_iter: int = 50,
+            beta: float = 1.0
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        EHVI optimization process:
+        1. Train separate GP models for each objective
+        2. Calculate EHVI using BoTorch
+        3. Select point with maximum EHVI
+        4. Update models with new observation
+        """
+        self.base_beta = beta
+        self.monitor = GPMonitor(dir_name=f"EHVI_{self.input_dim}_{self.output_dim}_{self.model_type}_{self.mobo_id}")
+
+        # Initialize Pareto front
+        self._update_pareto_front(X_train, Y_train, minimize=self.minimize)
+
+        for iteration in range(n_iter):
+            print(f"EHVI Iteration {iteration + 1}/{n_iter}")
+
+            # Train individual models for each objective dimension
+            predictions = []
+            for i, bo_model in enumerate(self.bo_models):
+                if NOISE:
+                    Y_train_noise = Y_train + 0.01 * torch.randn_like(Y_train)
+                    X_norm, y_norm = bo_model.normalize_data(
+                        X_train.clone(),
+                        Y_train_noise[:, i].clone()
+                    )
+                else:
+                    X_norm, y_norm = bo_model.normalize_data(
+                        X_train.clone(),
+                        Y_train[:, i].clone()
+                    )
+
+                model = bo_model.build_model(X_norm, y_norm)
+                model.train()
+                bo_model.likelihood.train()
+
+                # Training loop
+                optimizer = torch.optim.Adam(model.parameters(), lr=0.01) \
+                    if bo_model.optimizer_type == 'adam' \
+                    else torch.optim.LBFGS(model.parameters(), lr=0.1, max_iter=20)
+
+                if bo_model.model_type == 'SVGP':
+                    mll = gpytorch.mlls.VariationalELBO(
+                        bo_model.likelihood,
+                        model,
+                        num_data=y_norm.size(0)
+                    )
+                else:
+                    mll = gpytorch.mlls.ExactMarginalLogLikelihood(
+                        bo_model.likelihood,
+                        model
+                    )
+
+                # Optimization loop
+                prev_loss = float('inf')
+                for _ in range(bo_model.train_steps):
+                    if bo_model.optimizer_type == 'lbfgs':
+                        def closure():
+                            optimizer.zero_grad()
+                            output = model(X_norm)
+                            loss = -mll(output, y_norm)
+                            loss.backward()
+                            return loss
+
+                        optimizer.step(closure)
+                    else:
+                        optimizer.zero_grad()
+                        output = model(X_norm)
+                        loss = -mll(output, y_norm)
+                        loss.backward()
+                        optimizer.step()
+                        prev_loss = loss.item()
+
+                bo_model.model = model
+                predictions.append(bo_model)
+
+                # Log GP model parameters
+                self.monitor.log_kernel_params(model, i + 1, iteration)
+
+            # Update reference and nadir points if needed
+            self._update_and_normalize_reference_points(
+                Y_train if not NOISE else (Y_train + 0.01 * torch.randn_like(Y_train)))
+
+            # Use BoTorch EHVI to find the next point
+            next_x = optimize_with_ehvi(
+                models=predictions,
+                pareto_front=self.pareto_front,
+                nadir_point=self.nadir_point,
+                input_dim=self.input_dim,
+                x_mean=self.bo_models[0].x_mean,
+                x_std=self.bo_models[0].x_std,
+                minimize=self.minimize
+            )
+
+            # Evaluate new point for all objectives
+            next_y = self._evaluate_objectives(next_x.unsqueeze(0))
+
+            # Update training data
+            X_train = torch.cat([X_train, next_x.unsqueeze(0)])
+            Y_train = torch.cat([Y_train, next_y])
+
+            # Update Pareto front
+            self._update_pareto_front(X_train, Y_train, minimize=self.minimize)
+            self.model_list = predictions
+
+            # Log optimization metrics
+            metrics = {
+                'hypervolume': self.current_hv,
+                'pareto_points': self.pareto_front,
+            }
+            self.monitor.log_optimization_metrics(metrics, iteration)
+
+            if iteration % 5 == 0 or iteration == n_iter - 1:
+                print(f'Iteration {iteration}/{n_iter}, HV: {self.current_hv:.3f}')
+
+        self.monitor.close()
+        return X_train, Y_train
+
+
+class ParEGO(MultiObjectiveBayesianOptimization):
+    """ParEGO: Pareto Efficient Global Optimization
+
+    ParEGO uses a single surrogate model with augmented Tchebycheff scalarization and
+    expected improvement as the acquisition function.
+    """
+
+    def __init__(
+            self,
+            objective_func,
+            reference_point=None,
+            inducing_points=None,
+            train_steps=200,
+            model_type='ExactGP',
+            optimizer_type='adam',
+            rho=0.05,  # ParEGO typically uses higher rho values
+            mobo_id=None
+    ):
+        super().__init__(
+            objective_func=objective_func,
+            reference_point=reference_point,
+            inducing_points=inducing_points,
+            train_steps=train_steps,
+            model_type=model_type,
+            optimizer_type=optimizer_type,
+            rho=rho,
+            mobo_id=mobo_id if mobo_id else "ParEGO"
+        )
+
+        # Missing constructor definition
+        self.optimizer_type = optimizer_type
+
+        # Override scalarization to always use Augmented Tchebycheff
+        self.scalarization = AugmentedTchebycheff(
+            reference_point=self.reference_point,
+            rho=rho
+        )
+
+        # Create a single BO model for scalarized objectives
+        # This is a key difference from the parent class
+        self.single_model = None
+
+    def _compute_scalarized_values(self, Y, weights):
+        """Compute scalarized values for each point in Y using current weights"""
+        return self.scalarization(Y, weights)
+
+    def _compute_acquisition_batch(self, model, log_sampled_points, beta, weights):
+        """Use Expected Improvement instead of UCB"""
+        x_norm = log_sampled_points
+
+        # Use expected improvement acquisition function
+        acq_values = expected_improvement(
+            model.model,
+            model.likelihood,
+            x_norm,
+            self.best_scalarized_value
+        )
+
+        return acq_values.numpy()
+
+    def optimize(
+            self,
+            X_train: torch.Tensor,
+            Y_train: torch.Tensor,
+            n_iter: int = 50,
+            beta: float = 1.0
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        ParEGO optimization process:
+        1. Generate random weights for Tchebycheff scalarization
+        2. Scalarize the objectives to single values
+        3. Train a single GP model on scalarized values
+        4. Optimize EI acquisition function to find next point
+        """
+        self.base_beta = beta
+        self.monitor = GPMonitor(dir_name=f"ParEGO_{self.input_dim}_{self.output_dim}_{self.model_type}_{self.mobo_id}")
+
+        # Initialize best scalarized value for EI
+        self.best_scalarized_value = float('inf')
+
+        # Initialize BO model for single objective (scalarized)
+        single_obj = PseudoObjectiveFunction(
+            func=lambda x: torch.tensor([0.0]),  # Placeholder, will be updated
+            dim=self.input_dim,
+        )
+
+        self.single_model = BayesianOptimization(
+            objective_func=single_obj,
+            inducing_points=None,
+            train_steps=self.bo_models[0].train_steps,
+            model_type=self.model_type,
+            optimizer_type=self.optimizer_type
+        )
+
+        log_sampled_points = self._sample_points(10000, self.input_dim, 0)
+        Y_sampled_points = self._evaluate_objectives(log_sampled_points)
+
+        for iteration in range(n_iter):
+            # Generate new random weights for this iteration (ParEGO approach)
+            weights = self._generate_weight_vector(dim=self.output_dim)
+
+            # Compute scalarized values for training data
+            if NOISE:
+                Y_train_noise = Y_train + 0.01 * torch.randn_like(Y_train)
+                self._update_and_normalize_reference_points(Y_train_noise)
+                scalarized_values = self._compute_scalarized_values(Y_train_noise, weights)
+            else:
+                self._update_and_normalize_reference_points(Y_train)
+                scalarized_values = self._compute_scalarized_values(Y_train, weights)
+
+            # Update best scalarized value for EI
+            self.best_scalarized_value = torch.min(scalarized_values).item()
+
+            # Train single GP model on scalarized data
+            X_norm, y_norm = self.single_model.normalize_data(
+                X_train.clone(),
+                scalarized_values.clone()
+            )
+
+            model = self.single_model.build_model(X_norm, y_norm)
+            model.train()
+            self.single_model.likelihood.train()
+
+            # Training loop
+            optimizer = torch.optim.Adam(model.parameters(), lr=0.01) \
+                if self.single_model.optimizer_type == 'adam' \
+                else torch.optim.LBFGS(model.parameters(), lr=0.1, max_iter=20)
+
+            if self.single_model.model_type == 'SVGP':
+                mll = gpytorch.mlls.VariationalELBO(
+                    self.single_model.likelihood,
+                    model,
+                    num_data=y_norm.size(0)
+                )
+            else:
+                mll = gpytorch.mlls.ExactMarginalLogLikelihood(
+                    self.single_model.likelihood,
+                    model
+                )
+
+            # Optimization loop for GP model
+            prev_loss = float('inf')
+            for _ in range(self.single_model.train_steps):
+                optimizer.zero_grad()
+                output = model(X_norm)
+                loss = -mll(output, y_norm)
+                loss.backward()
+                optimizer.step()
+                prev_loss = loss.item()
+
+            self.single_model.model = model
+
+            # Log GP model parameters
+            self.monitor.log_kernel_params(model, 0, iteration)
+
+            # Normalize sample points
+            norm_log_sampled_points = (log_sampled_points - self.single_model.x_mean) / self.single_model.x_std
+
+            # Optimize acquisition function (EI)
+            acq_values = self._compute_acquisition_batch(
+                self.single_model,
+                norm_log_sampled_points,
+                beta,
+                weights
+            )
+
+            self.monitor.log_acquisition_values(acq_values, iteration)
+
+            # Optimize acquisition function to find next point
+            next_x = optimize_scalarized_acquisition_ei(
+                model=self.single_model,
+                best_value=self.best_scalarized_value,
+                input_dim=self.input_dim,
+                x_mean=self.single_model.x_mean,
+                x_std=self.single_model.x_std
+            )
+
+            # Evaluate new point for all objectives
+            next_y = self._evaluate_objectives(next_x.unsqueeze(0))
+            if NOISE:
+                next_y_noise = next_y + 0.01 * torch.randn_like(next_y)
+
+            # Update training data
+            X_train = torch.cat([X_train, next_x.unsqueeze(0)])
+            Y_train = torch.cat([Y_train, next_y])
+
+            # Update Pareto front
+            self._update_pareto_front(X_train, Y_train)
+
+            # Log optimization metrics
+            metrics = {
+                'hypervolume': self.current_hv,
+                'pareto_points': self.pareto_front
+            }
+            self.monitor.log_optimization_metrics(metrics, iteration)
+
+            if iteration % 5 == 0:
+                print(f'Iteration {iteration}/{n_iter}, Best HV: {self.current_hv:.3f}')
+
+        self.monitor.close()
         return X_train, Y_train
 
 
