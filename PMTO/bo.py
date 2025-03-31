@@ -1576,7 +1576,8 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
         if len(combined_set) > 0:
             # Compute weight vectors for each solution
             reference_point = self.global_reference_point
-            top_p = 0.4
+            # top_p = 0.4
+            top_p = 0.1
             context_mask = torch.all(self.X_train[:, self.input_dim:] == context, dim=1)
             combined_contexts = []
             augmented_vae_sets = []
@@ -1683,7 +1684,7 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
         all_contexts = []
 
         # Create a TensorBoard writer
-        log_dir = os.path.join(f"./log_tier/{self.base_dir_name}", f"beta_VAE_logs_{iteration}")
+        log_dir = os.path.join(f"./log_tier/{self.base_dir_name}_0.1", f"beta_VAE_logs_{iteration}")
         writer = SummaryWriter(log_dir)
 
         for context_key in self.vae_training_sets.keys():
@@ -1895,7 +1896,7 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
         self.Y_train = Y_train.clone()
 
         n_contexts = contexts.shape[0]
-        self.base_dir_name = f"VAE_CMOBO_{self.problem_name}_{self.input_dim}_{self.output_dim}_{self.model_type}_{self.vae_training_frequency}_{run}"
+        self.base_dir_name = f"VAE_CMOBO_{self.problem_name}_{self.input_dim}_{self.output_dim}_{self.model_type}_{self.vae_training_frequency}_{run}_0.1"
         self.initialize_monitors(n_contexts, self.base_dir_name)
         log_sampled_points = self._sample_points(30000, self.input_dim, 0)
 

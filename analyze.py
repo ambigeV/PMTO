@@ -53,16 +53,16 @@ def process_hypervolumes(all_runs_data):
     return context_hv_data
 
 
-def analyze_and_plot_results(base_path, timestamp, n_runs):
+def analyze_and_plot_results(base_path, timestamp, n_runs, problem_name):
     """Analyze and plot results for both MOBO and CMOBO methods."""
     # Load data for both methods
-    timestamp = "{}_{}_{}_{:.2f}_test_hv".format("dtlz3", 5, 2, 0.01)
+    timestamp = "{}_{}_{}_{:.2f}_test_hv".format(problem_name, 5, 2, 0.01)
     mobo_data = load_run_data(base_path, 'MOBO', timestamp, n_runs)
-    timestamp = "{}_{}_{}_{:.2f}_test".format("dtlz3", 5, 2, 1.00)
+    timestamp = "{}_{}_{}_{:.2f}_test".format(problem_name, 5, 2, 1.00)
     exact_timestamp = timestamp + "_CustomGP_hv_constrain"
     cmobo_data_exactgp = load_run_data(base_path, 'CMOBO', exact_timestamp, n_runs)
     ard_timestamp = timestamp + "_CustomGP_hv_constrain"
-    cmobo_data_ardgp = load_run_data(base_path, 'betaVAE-CMOBO-nosigmoid_aug_1', ard_timestamp, n_runs)
+    cmobo_data_ardgp = load_run_data(base_path, 'betaVAE-CMOBO-nosigmoid_aug_2_0.1', ard_timestamp, n_runs)
     # timestamp = "{}_{}_{}_{:.2f}_test_norm".format("dtlz2", 3, 2, 0.80)
 
     if not mobo_data or not cmobo_data_exactgp or not cmobo_data_ardgp:
@@ -143,7 +143,7 @@ def analyze_and_plot_results(base_path, timestamp, n_runs):
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
 
     # Save the comparison plot
-    save_path = Path(base_path) / f'comparison_plot_betavae_{timestamp}_hv.png'
+    save_path = Path(base_path) / f'comparison_plot_betavae_0.1_{timestamp}_hv.png'
     plt.savefig(save_path)
     plt.close()
 
@@ -187,7 +187,7 @@ def analyze_and_plot_results(base_path, timestamp, n_runs):
 
     timestamp = timestamp + "_clean"
     # Save the summary plot
-    summary_save_path = Path(base_path) / f'summary_comparison_plot_betavae_{timestamp}_hv.png'
+    summary_save_path = Path(base_path) / f'summary_comparison_plot_betavae_0.1_{timestamp}_hv.png'
     plt.savefig(summary_save_path)
     plt.close()
 
@@ -212,7 +212,7 @@ def analyze_and_plot_results(base_path, timestamp, n_runs):
 
 if __name__ == "__main__":
     # Configuration
-    problem_name = "dtlz1"
+    problem_name = "dtlz3"
     problem_dim = 5
     problem_obj = 2
     problem_beta = 1.00
@@ -221,7 +221,7 @@ if __name__ == "__main__":
     n_runs = 5  # Adjust based on your actual number of runs
 
     # Run analysis
-    stats = analyze_and_plot_results(base_path, timestamp, n_runs)
+    stats = analyze_and_plot_results(base_path, timestamp, n_runs, problem_name)
     # tot_path = "./result/CMOBO_optimization_history_dtlz-2_5_2_run_0.pth"
     # result = torch.load(tot_path)
     # print(result.keys)
