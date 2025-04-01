@@ -2,7 +2,7 @@ from PMTO import BayesianOptimization, ObjectiveFunction, \
     MultiObjectiveFunction, MultiObjectiveBayesianOptimization, \
     ContextualBayesianOptimization, ContextualMultiObjectiveFunction, \
     ContextualMultiObjectiveBayesianOptimization, PseudoObjectiveFunction, \
-    VAEEnhancedCMOBO, ParEGO, EHVI
+    VAEEnhancedCMOBO, ParEGO, EHVI, PSLMOBO
 import torch
 import matplotlib.pyplot as plt
 import numpy as np
@@ -898,6 +898,142 @@ def run_ehvi_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2,
         plt.close()
 
 
+def run_pslmobo_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2,
+                     n_variables=5, temp_beta=1.0, model_type="ExactGP",
+                     coef_lcb=0.5, n_candidate=50, n_pref_update=5):
+    """
+    Run PSL-MOBO optimization tests on specified problem with multiple contexts
+
+    Args:
+        problem_name: Name of the test problem (e.g., 'dtlz2')
+        n_runs: Number of independent optimization runs
+        n_iter: Number of optimization iterations per run
+        n_objectives: Number of objective functions
+        n_variables: Number of decision variables
+        temp_beta: Beta parameter for acquisition function
+        model_type: GP model type ('ExactGP' or 'SVGP')
+        coef_lcb: LCB coefficient for exploration
+        n_candidate: Number of candidates to sample from PS model
+        n_pref_update: Number of preferences to sample per update
+    """
+    # Initialize the objective function
+    obj_func = ContextualMultiObjectiveFunction(func_name=problem_name,
+                                                n_objectives=n_objectives,
+                                                n_variables=n_variables)
+    # Update directory
+    directory_path = f'result/{problem_name}'
+    if not os.path.exists(directory_path):
+        # Create the directory
+        os.makedirs(directory_path)
+
+    # Set up fixed contexts using LHS
+    n_contexts = 8
+    contexts_file = 'data/context_{}_{}.pth'.format(n_contexts, obj_func.context_dim)
+
+    if os.path.exists(contexts_file):
+        contexts = torch.load(contexts_file)
+    else:
+        contexts = generate_and_save_contexts(n_contexts, obj_func.context_dim, contexts_file)
+
+    timestamp = "{}_{}_{}_{:.2f}_pslmobo_test_hv".format(problem_name,
+                                                         n_variables,
+                                                         n_objectives,
+                                                         temp_beta)
+
+    for run in range(n_runs):
+        print(f"Starting PSL-MOBO run {run + 1}/{n_runs}")
+
+        run_data = {}
+        for context_idx, context in enumerate(contexts):
+            print(f" Optimizing for context {context_idx + 1}/{len(contexts)}")
+
+            # Create a wrapper function for this specific context
+            def context_specific_obj(x):
+                x_with_context = torch.cat([x, context.unsqueeze(0).repeat(x.shape[0], 1)], dim=1)
+                return obj_func.evaluate(x_with_context)
+
+            # Create the pseudo-objective function
+            pseudo_obj = PseudoObjectiveFunction(
+                func=context_specific_obj,
+                dim=obj_func.input_dim,
+                context_dim=obj_func.context_dim,
+                output_dim=obj_func.output_dim,
+                nadir_point=obj_func.nadir_point
+            )
+
+            # Initialize PSL-MOBO optimizer
+            pslmobo = PSLMOBO(
+                objective_func=pseudo_obj,
+                model_type=model_type,
+                minimize=True,
+                coef_lcb=coef_lcb,
+                n_candidate=n_candidate,
+                n_pref_update=n_pref_update,
+                mobo_id=context_idx + 1,
+            )
+
+            # Generate initial points for this context
+            n_initial_points = 20
+            # Load pre-generated initial points if available
+            X_init = torch.load("data/init_points_context_{}_{}_{}.pth".format(context_idx,
+                                                                               obj_func.input_dim,
+                                                                               n_initial_points))
+            Y_init = context_specific_obj(X_init)
+
+            # Run optimization
+            X_opt, Y_opt = pslmobo.optimize(X_init, Y_init, n_iter=n_iter, beta=temp_beta)
+
+            # Store results for this context
+            context_key = tuple(context.numpy())
+            run_data[context_key] = {
+                'pareto_set_history': pslmobo.pareto_set_history,
+                'pareto_front_history': pslmobo.pareto_front_history,
+                'hv_history': pslmobo.hv_history,
+            }
+
+        # Save individual run data
+        save_path = f'result/{problem_name}/PSLMOBO_optimization_history_{timestamp}_run_{run}.pth'
+        torch.save(run_data, save_path)
+        print(f"PSL-MOBO run {run} data saved to {save_path}")
+
+        # Plot results for this run
+        fig, axes = plt.subplots(2, 4, figsize=(20, 20))
+        fig.suptitle(f'PSL-MOBO Hypervolume History for Each Context (Run {run + 1})', fontsize=16)
+
+        for context_idx, context in enumerate(contexts):
+            row = context_idx // 4
+            col = context_idx % 4
+            ax = axes[row, col]
+
+            context_key = tuple(context.numpy())
+            hv_history = run_data[context_key]['hv_history']
+            ax.plot(range(len(hv_history)), hv_history, label=f'Run {run + 1}')
+
+            ax.set_title(f'Context {context_idx + 1}')
+            ax.set_xlabel('Iteration')
+            ax.set_ylabel('Hypervolume')
+            ax.legend()
+
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+        plt.savefig(f'result/{problem_name}/PSLMOBO_hypervolume_history_grid_{timestamp}_run_{run}.png')
+        plt.close()
+
+
+
+# # Example usage
+# if __name__ == "__main__":
+#     run_pslmobo_test(
+#         problem_name='dtlz2',
+#         n_runs=1,
+#         n_iter=50,
+#         n_objectives=2,
+#         n_variables=5,
+#         coef_lcb=0.5,
+#         n_candidate=50,
+#         n_pref_update=5
+#     )
+
+
 def main():
     args = parse_arguments()
 
@@ -931,6 +1067,15 @@ def main():
            n_objectives=args.n_objectives,
            n_variables=args.n_variables,
            rho=0.001,
+        )
+
+    if args.method_name == "PSLMOBO":
+       run_pslmobo_test(
+           problem_name=args.problem,
+           n_runs=args.n_runs,
+           n_iter=args.n_iter,
+           n_objectives=args.n_objectives,
+           n_variables=args.n_variables,
         )
 
     if args.method_name == "EHVI":
@@ -1010,6 +1155,16 @@ def main():
 if __name__ == "__main__":
     # Set random seed for reproducibility
     torch.manual_seed(42)
+    # run_pslmobo_test(
+    #     problem_name='dtlz2',
+    #     n_runs=1,
+    #     n_iter=10,
+    #     n_objectives=2,
+    #     n_variables=5,
+    #     coef_lcb=0.5,
+    #     n_candidate=50,
+    #     n_pref_update=10
+    # )
     # np.random.seed(42)
     # run_ehvi_test(
     #     problem_name='dtlz2',

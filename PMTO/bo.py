@@ -17,6 +17,7 @@ from torch.utils.tensorboard import SummaryWriter
 from .LBFGS import FullBatchLBFGS
 # CVAE Model
 from .gen_models import ParetoVAETrainer
+from .util_models import ParetoSetModel, compute_gp_gradients
 import os
 
 
@@ -987,6 +988,362 @@ class MultiObjectiveBayesianOptimization:
 
         self.monitor.close()
 
+        return X_train, Y_train
+
+
+class PSLMOBO(MultiObjectiveBayesianOptimization):
+    """Pareto Set Learning for Multi-Objective Bayesian Optimization
+
+    PSL-MOBO learns a mapping from preference vectors to decision variables that
+    directly represents the Pareto set, then samples from this model to select new points.
+    """
+
+    def __init__(
+            self,
+            objective_func,
+            reference_point=None,
+            inducing_points=None,
+            train_steps=150,  # Steps for Pareto Set Learning
+            model_type='ExactGP',
+            optimizer_type='adam',
+            rho=0.001,
+            mobo_id=None,
+            minimize=True,
+            coef_lcb=0.5,  # LCB coefficient for exploration
+            n_candidate=50,  # Number of candidates to sample from PS model
+            n_pref_update=5  # Number of preferences to sample per update
+    ):
+        super().__init__(
+            objective_func=objective_func,
+            reference_point=reference_point,
+            inducing_points=inducing_points,
+            train_steps=train_steps,
+            model_type=model_type,
+            optimizer_type=optimizer_type,
+            rho=rho,
+            mobo_id=mobo_id if mobo_id else "PSL-MOBO"
+        )
+
+        self.minimize = minimize
+        self.coef_lcb = coef_lcb
+        self.n_candidate = n_candidate
+        self.n_pref_update = n_pref_update
+        self.psmodel = None
+        self.train_steps = train_steps
+
+        # Store hypervolume improvement history
+        self.hvi_history = []
+
+    def _train_pareto_set_model(self, X_train, Y_train, predictions):
+        """
+        Train the Pareto Set Model that maps preferences to decision variables
+
+        Args:
+            X_train: Training input points
+            Y_train: Training objective values
+            predictions: Trained surrogate models
+
+        Returns:
+            Trained Pareto Set Model
+        """
+
+        # Create Pareto Set Model if not exists
+        if self.psmodel is None:
+            # Initialize model using the external ParetoSetModel class
+            self.psmodel = ParetoSetModel(self.input_dim, self.output_dim)
+
+        # Set up optimizer
+        optimizer = torch.optim.Adam(self.psmodel.parameters(), lr=1e-3)
+
+        # Get non-dominated points
+        nds = NonDominatedSorting().do(Y_train.numpy())[0]
+        X_nds = X_train[nds]
+        Y_nds = Y_train[nds]
+
+        # Compute reference point for improvement (ideal point with a margin)
+        z = torch.min(Y_nds.clone().detach(), dim=0)[0] - 0.1
+
+        # Training loop
+        for _ in range(self.train_steps):
+            self.psmodel.train()
+
+            # Sample preferences from Dirichlet distribution
+            alpha = torch.ones(self.output_dim)
+            pref = torch.distributions.Dirichlet(alpha).sample((self.n_pref_update,))
+
+            # Get corresponding solutions from model
+            optimizer.zero_grad()
+            x = self.psmodel(pref)
+
+            # Predict objectives for all models
+            mean_list = []
+            std_list = []
+            mean_grad_list = []
+            std_grad_list = []
+
+            for model in predictions:
+                model.model.eval()
+                with torch.no_grad():
+                    output = model.model(x)
+                    mean = output.mean
+                    std = torch.sqrt(output.variance)
+
+                # Calculate gradients using the utility function
+                mean_grad, std_grad = compute_gp_gradients(model.model, model.likelihood, x)
+
+                # Store predictions and gradients
+                mean_list.append(mean)
+                std_list.append(std)
+                mean_grad_list.append(mean_grad)
+                std_grad_list.append(std_grad)
+
+            # Stack for multi-objective
+            # print(x.shape)
+            # print(mean_list[-1].shape)
+            # print(len(mean_list))
+            # print(mean_grad_list[-1].shape)
+            # print(len(mean_grad_list))
+            mean = torch.stack(mean_list, dim=1)
+            std = torch.stack(std_list, dim=1)
+            mean_grad = torch.stack(mean_grad_list, dim=1)
+            std_grad = torch.stack(std_grad_list, dim=1)
+            # print("mean shape is {}".format(mean.shape))
+            # print("mean_grad shape is {}".format(mean_grad.shape))
+
+            # calculate the value/grad of tch decomposition with LCB
+            value = mean - self.coef_lcb * std
+            value_grad = mean_grad - self.coef_lcb * std_grad
+
+            tch_idx = torch.argmax((1 / pref) * (value - z), dim=1)
+            tch_idx_mat = [torch.arange(len(tch_idx)), tch_idx]
+            tch_grad = (1 / pref)[tch_idx_mat].view(self.n_pref_update, 1) * \
+                       value_grad[tch_idx_mat] + 0.01 * torch.sum(value_grad, dim=1)
+
+            tch_grad = tch_grad / (torch.norm(tch_grad, dim=1)[:, None] + 1e-8)
+
+            # gradient-based pareto set model update
+            optimizer.zero_grad()
+            self.psmodel(pref).backward(tch_grad)
+            optimizer.step()
+
+        self.psmodel.eval()
+        return self.psmodel
+
+    def _sample_new_points(self, psmodel, predictions, n_sample=1):
+        """
+        Sample new points from the learned Pareto set model
+
+        Args:
+            psmodel: Trained Pareto set model
+            predictions: List of trained GP models
+            n_sample: Number of new points to sample
+
+        Returns:
+            Next points to evaluate
+        """
+
+        import numpy as np
+        from pymoo.indicators.hv import HV
+
+        # Sample candidate preferences
+        alpha = torch.ones(self.output_dim)
+        pref_samples = torch.distributions.Dirichlet(alpha).sample((self.n_candidate,))
+
+        # Generate corresponding solutions
+        with torch.no_grad():
+            X_candidate = psmodel(pref_samples)
+
+        # Get predicted objective values
+        Y_mean_list = []
+        Y_std_list = []
+
+        for model in predictions:
+            with torch.no_grad():
+                output = model.model(X_candidate)
+                mean = output.mean
+                std = torch.sqrt(output.variance)
+
+                Y_mean_list.append(mean)
+                Y_std_list.append(std)
+
+        # Stack predictions
+        Y_mean = torch.stack(Y_mean_list, dim=1)
+        Y_std = torch.stack(Y_std_list, dim=1)
+
+        # Apply LCB acquisition
+        Y_candidate = Y_mean - self.coef_lcb * Y_std
+
+        # Get current non-dominated front
+        Y_train_list = []
+        for model in predictions:
+            Y_train_list.append(model.model.train_targets)
+
+        Y_train = torch.stack(Y_train_list, dim=1)
+        nds = NonDominatedSorting().do(Y_train.numpy())[0]
+        Y_front = Y_train[nds].numpy()
+
+        # Greedy batch selection using hypervolume improvement
+        selected_indices = []
+        current_front = Y_front.copy()
+
+        # Reference point for hypervolume calculation - slightly worse than worst point
+        ref_point = np.max(np.vstack([Y_front, Y_candidate.numpy()]), axis=0) * 1.1
+
+        for _ in range(n_sample):
+            hv_calculator = HV(ref_point=ref_point)
+            base_hv = hv_calculator(current_front)
+
+            best_hvi = -float('inf')
+            best_idx = 0
+
+            for i in range(len(Y_candidate)):
+                if i in selected_indices:
+                    continue
+
+                # Calculate hypervolume with this point added
+                candidate_point = Y_candidate[i].numpy().reshape(1, -1)
+                new_front = np.vstack([current_front, candidate_point])
+
+                # If minimizing, we need non-dominated sorting again
+                if self.minimize:
+                    nd_idx = NonDominatedSorting().do(new_front)[0]
+                    nd_front = new_front[nd_idx]
+                else:
+                    nd_front = new_front
+
+                new_hv = hv_calculator(nd_front)
+
+                # Calculate improvement
+                hvi = new_hv - base_hv
+
+                if hvi > best_hvi:
+                    best_hvi = hvi
+                    best_idx = i
+
+            selected_indices.append(best_idx)
+            current_front = np.vstack([current_front, Y_candidate[best_idx].numpy()])
+
+            # Store HVI for tracking
+            if len(self.hvi_history) <= _:
+                self.hvi_history.append(best_hvi)
+            else:
+                self.hvi_history[_] = best_hvi
+
+        # Return selected points
+        return X_candidate[selected_indices]
+
+    def optimize(
+            self,
+            X_train: torch.Tensor,
+            Y_train: torch.Tensor,
+            n_iter: int = 50,
+            beta: float = 1.0
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        PSL-MOBO optimization process:
+        1. Train surrogate models for each objective
+        2. Learn Pareto set model through gradient updates
+        3. Sample and select points from learned model
+        4. Update dataset with new evaluations
+        """
+        self.base_beta = beta
+        self.monitor = GPMonitor(
+            dir_name=f"PSL-MOBO_{self.input_dim}_{self.output_dim}_{self.model_type}_{self.mobo_id}")
+
+        # Initialize Pareto front
+        self._update_pareto_front(X_train, Y_train, minimize=self.minimize)
+
+        for iteration in range(n_iter):
+            print(f"PSL-MOBO Iteration {iteration + 1}/{n_iter}")
+
+            # Train individual models for each objective dimension
+            predictions = []
+            for i, bo_model in enumerate(self.bo_models):
+                if NOISE:
+                    Y_train_noise = Y_train + 0.01 * torch.randn_like(Y_train)
+                    X_norm, y_norm = bo_model.normalize_data(
+                        X_train.clone(),
+                        Y_train_noise[:, i].clone()
+                    )
+                else:
+                    X_norm, y_norm = bo_model.normalize_data(
+                        X_train.clone(),
+                        Y_train[:, i].clone()
+                    )
+
+                model = bo_model.build_model(X_norm, y_norm)
+                model.train()
+                bo_model.likelihood.train()
+
+                # Training loop
+                optimizer = torch.optim.Adam(model.parameters(), lr=0.01) \
+                    if bo_model.optimizer_type == 'adam' \
+                    else torch.optim.LBFGS(model.parameters(), lr=0.1, max_iter=20)
+
+                if bo_model.model_type == 'SVGP':
+                    mll = gpytorch.mlls.VariationalELBO(
+                        bo_model.likelihood,
+                        model,
+                        num_data=y_norm.size(0)
+                    )
+                else:
+                    mll = gpytorch.mlls.ExactMarginalLogLikelihood(
+                        bo_model.likelihood,
+                        model
+                    )
+
+                # Optimization loop
+                for _ in range(bo_model.train_steps):
+                    if bo_model.optimizer_type == 'lbfgs':
+                        def closure():
+                            optimizer.zero_grad()
+                            output = model(X_norm)
+                            loss = -mll(output, y_norm)
+                            loss.backward()
+                            return loss
+
+                        optimizer.step(closure)
+                    else:
+                        optimizer.zero_grad()
+                        output = model(X_norm)
+                        loss = -mll(output, y_norm)
+                        loss.backward()
+                        optimizer.step()
+
+                bo_model.model = model
+                predictions.append(bo_model)
+
+                # Log GP model parameters
+                self.monitor.log_kernel_params(model, i + 1, iteration)
+
+            # Learn Pareto set model
+            psmodel = self._train_pareto_set_model(X_train, Y_train, predictions)
+
+            # Sample new points using the learned model
+            next_x = self._sample_new_points(psmodel, predictions)
+
+            # Evaluate new point for all objectives
+            next_y = self._evaluate_objectives(next_x)
+
+            # Update training data
+            X_train = torch.cat([X_train, next_x])
+            Y_train = torch.cat([Y_train, next_y])
+
+            # Update Pareto front
+            self._update_pareto_front(X_train, Y_train, minimize=self.minimize)
+            self.model_list = predictions
+
+            # Log optimization metrics
+            metrics = {
+                'hypervolume': self.current_hv,
+                'pareto_points': self.pareto_front,
+            }
+            self.monitor.log_optimization_metrics(metrics, iteration)
+
+            if iteration % 5 == 0 or iteration == n_iter - 1:
+                print(f'Iteration {iteration}/{n_iter}, HV: {self.current_hv:.3f}')
+
+        self.monitor.close()
         return X_train, Y_train
 
 
