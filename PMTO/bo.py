@@ -315,6 +315,72 @@ class BayesianOptimization:
 
         return X_normalized, Y_normalized
 
+    def normalize_minmax_data(self, X, Y, input_bounds=torch.Tensor([0, 1]), output_bounds=None):
+        """
+        Perform min-max normalization to scale data to [0,1] range.
+
+        Parameters:
+        - X: Training input data (train_X).
+        - Y: Training output data (train_Y).
+        - input_bounds: Optional bounds for X in format [[min_x1, min_x2,...], [max_x1, max_x2,...]].
+                       If None, bounds are determined from the data.
+        - output_bounds: Optional bounds for Y in format [[min_y1, min_y2,...], [max_y1, max_y2,...]].
+                        If None, bounds are determined from the data.
+
+        Returns:
+        - Normalized X and Y tensors scaled to [0,1].
+        """
+        # Determine input bounds if not provided
+        if input_bounds is None:
+            x_min, _ = torch.min(X, dim=0)
+            x_max, _ = torch.max(X, dim=0)
+        else:
+            x_min = input_bounds[0]
+            x_max = input_bounds[1]
+
+        # Determine output bounds if not provided
+        if output_bounds is None:
+            y_min, _ = torch.min(Y, dim=0)
+            y_max, _ = torch.max(Y, dim=0)
+        else:
+            y_min = output_bounds[0]
+            y_max = output_bounds[1]
+
+        # Add small epsilon to prevent division by zero
+        x_range = (x_max - x_min) + 1e-8
+        y_range = (y_max - y_min) + 1e-8
+
+        # Min-max normalization to [0,1]
+        X_normalized = (X - x_min) / x_range
+        Y_normalized = (Y - y_min) / y_range
+
+        # Store the current normalization parameters
+        self.x_min, self.x_max = x_min, x_max
+        self.y_min, self.y_max = y_min, y_max
+
+        return X_normalized, Y_normalized
+
+    def denormalize_minmax_data(self, X_norm, Y_norm=None):
+        """
+        Convert normalized data back to original scale.
+
+        Parameters:
+        - X_norm: Normalized input data.
+        - Y_norm: Normalized output data (optional).
+
+        Returns:
+        - Denormalized X and Y tensors (Y only if provided).
+        """
+        # Denormalize X
+        X = X_norm * (self.x_max - self.x_min) + self.x_min
+
+        # Denormalize Y if provided
+        if Y_norm is not None:
+            Y = Y_norm * (self.y_max - self.y_min) + self.y_min
+            return X, Y
+
+        return X
+
     def normalize_inference(self, X):
         """
         Normalize new input points during inference using stored scaling factors.
@@ -1258,6 +1324,8 @@ class PSLMOBO(MultiObjectiveBayesianOptimization):
 
             # Train individual models for each objective dimension
             predictions = []
+            X_norm_psl = None
+            Y_norm_psl = []
             for i, bo_model in enumerate(self.bo_models):
                 if NOISE:
                     Y_train_noise = Y_train + 0.01 * torch.randn_like(Y_train)
@@ -1270,6 +1338,10 @@ class PSLMOBO(MultiObjectiveBayesianOptimization):
                         X_train.clone(),
                         Y_train[:, i].clone()
                     )
+                    # print("y_norm in shape of {}".format(y_norm.shape))
+
+                X_norm_psl = X_norm.clone().detach()
+                Y_norm_psl.append(y_norm)
 
                 model = bo_model.build_model(X_norm, y_norm)
                 model.train()
@@ -1317,7 +1389,8 @@ class PSLMOBO(MultiObjectiveBayesianOptimization):
                 self.monitor.log_kernel_params(model, i + 1, iteration)
 
             # Learn Pareto set model
-            psmodel = self._train_pareto_set_model(X_train, Y_train, predictions)
+            Y_norm_psl = torch.stack(Y_norm_psl, dim=1)
+            psmodel = self._train_pareto_set_model(X_norm_psl, Y_norm_psl, predictions)
 
             # Sample new points using the learned model
             next_x = self._sample_new_points(psmodel, predictions)
@@ -1404,21 +1477,33 @@ class EHVI(MultiObjectiveBayesianOptimization):
         for iteration in range(n_iter):
             print(f"EHVI Iteration {iteration + 1}/{n_iter}")
 
+            Y_norm_min = []
+            Y_norm_max = []
             # Train individual models for each objective dimension
             predictions = []
             for i, bo_model in enumerate(self.bo_models):
                 if NOISE:
                     Y_train_noise = Y_train + 0.01 * torch.randn_like(Y_train)
-                    X_norm, y_norm = bo_model.normalize_data(
+                    # X_norm, y_norm = bo_model.normalize_data(
+                    #     X_train.clone(),
+                    #     Y_train_noise[:, i].clone()
+                    # )
+                    X_norm, y_norm = bo_model.normalize_minmax_data(
                         X_train.clone(),
                         Y_train_noise[:, i].clone()
                     )
                 else:
-                    X_norm, y_norm = bo_model.normalize_data(
+                    # X_norm, y_norm = bo_model.normalize_data(
+                    #     X_train.clone(),
+                    #     Y_train[:, i].clone()
+                    # )
+                    X_norm, y_norm = bo_model.normalize_minmax_data(
                         X_train.clone(),
                         Y_train[:, i].clone()
                     )
 
+                Y_norm_min.append(bo_model.y_min)
+                Y_norm_max.append(bo_model.y_max)
                 model = bo_model.build_model(X_norm, y_norm)
                 model.train()
                 bo_model.likelihood.train()
@@ -1465,19 +1550,25 @@ class EHVI(MultiObjectiveBayesianOptimization):
 
                 # Log GP model parameters
                 self.monitor.log_kernel_params(model, i + 1, iteration)
+            Y_norm_min = torch.Tensor(Y_norm_min)
+            Y_norm_max = torch.Tensor(Y_norm_max)
 
             # Update reference and nadir points if needed
             self._update_and_normalize_reference_points(
                 Y_train if not NOISE else (Y_train + 0.01 * torch.randn_like(Y_train)))
 
+            def norm_y(cur_tensor, y_min, y_max):
+                return (cur_tensor.clone().detach() - y_min) / (y_max - y_min + 1e-8)
+
+            norm_pareto_front = norm_y(self.pareto_front, Y_norm_min, Y_norm_max)
+            norm_nadir_point = norm_y(self.nadir_point, Y_norm_min, Y_norm_max)
+
             # Use BoTorch EHVI to find the next point
             next_x = optimize_with_ehvi(
                 models=predictions,
-                pareto_front=self.pareto_front,
-                nadir_point=self.nadir_point,
+                pareto_front=norm_pareto_front,
+                nadir_point=norm_nadir_point,
                 input_dim=self.input_dim,
-                x_mean=self.bo_models[0].x_mean,
-                x_std=self.bo_models[0].x_std,
                 minimize=self.minimize
             )
 

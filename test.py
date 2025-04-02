@@ -871,7 +871,7 @@ def run_ehvi_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2,
             }
 
         # Save individual run data
-        save_path = f'result/{problem_name}/EHVI2_optimization_history_{timestamp}_run_{run}.pth'
+        save_path = f'result/{problem_name}/EHVI3_optimization_history_{timestamp}_run_{run}.pth'
         torch.save(run_data, save_path)
         print(f"EHVI run {run} data saved to {save_path}")
 
@@ -894,7 +894,7 @@ def run_ehvi_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2,
             ax.legend()
 
         plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-        plt.savefig(f'result/{problem_name}/EHVI2_hypervolume_history_grid_{timestamp}_run_{run}.png')
+        plt.savefig(f'result/{problem_name}/EHVI3_hypervolume_history_grid_{timestamp}_run_{run}.png')
         plt.close()
 
 
@@ -992,7 +992,7 @@ def run_pslmobo_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2,
             }
 
         # Save individual run data
-        save_path = f'result/{problem_name}/PSLMOBO_optimization_history_{timestamp}_run_{run}.pth'
+        save_path = f'result/{problem_name}/PSLMOBO2_optimization_history_{timestamp}_run_{run}.pth'
         torch.save(run_data, save_path)
         print(f"PSL-MOBO run {run} data saved to {save_path}")
 
@@ -1015,7 +1015,7 @@ def run_pslmobo_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2,
             ax.legend()
 
         plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-        plt.savefig(f'result/{problem_name}/PSLMOBO_hypervolume_history_grid_{timestamp}_run_{run}.png')
+        plt.savefig(f'result/{problem_name}/PSLMOBO2_hypervolume_history_grid_{timestamp}_run_{run}.png')
         plt.close()
 
 
@@ -1166,13 +1166,13 @@ if __name__ == "__main__":
     #     n_pref_update=10
     # )
     # np.random.seed(42)
-    # run_ehvi_test(
-    #     problem_name='dtlz2',
-    #     n_runs=1,
-    #     n_iter=10,
-    #     n_objectives=2,
-    #     n_variables=5,
-    # )
+    run_ehvi_test(
+        problem_name='dtlz2',
+        n_runs=1,
+        n_iter=10,
+        n_objectives=2,
+        n_variables=5,
+    )
     # run_parego_test(
     #     problem_name='dtlz2',
     #     n_runs=1,
@@ -1181,7 +1181,7 @@ if __name__ == "__main__":
     #     n_variables=5,
     #     rho=0.001  # ParEGO-specific parameter
     # )
-    main()
+    # main()
     # generate_and_save_contexts()
     # Run tests
     # optimization_loop_test()
