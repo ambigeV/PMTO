@@ -1424,7 +1424,7 @@ class EHVI(MultiObjectiveBayesianOptimization):
                 bo_model.likelihood.train()
 
                 # Training loop
-                optimizer = torch.optim.Adam(model.parameters(), lr=0.01) \
+                optimizer = torch.optim.Adam(model.parameters(), lr=0.001) \
                     if bo_model.optimizer_type == 'adam' \
                     else torch.optim.LBFGS(model.parameters(), lr=0.1, max_iter=20)
 

@@ -871,7 +871,7 @@ def run_ehvi_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2,
             }
 
         # Save individual run data
-        save_path = f'result/{problem_name}/EHVI_optimization_history_{timestamp}_run_{run}.pth'
+        save_path = f'result/{problem_name}/EHVI2_optimization_history_{timestamp}_run_{run}.pth'
         torch.save(run_data, save_path)
         print(f"EHVI run {run} data saved to {save_path}")
 
@@ -894,7 +894,7 @@ def run_ehvi_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2,
             ax.legend()
 
         plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-        plt.savefig(f'result/{problem_name}/EHVI_hypervolume_history_grid_{timestamp}_run_{run}.png')
+        plt.savefig(f'result/{problem_name}/EHVI2_hypervolume_history_grid_{timestamp}_run_{run}.png')
         plt.close()
 
 

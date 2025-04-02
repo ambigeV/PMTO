@@ -122,6 +122,7 @@ class CompositeKernel(gpytorch.kernels.Kernel):
 
         return k_dec * k_ctx
 
+
 class CustomGPModel(gpytorch.models.ExactGP):
     def __init__(self, train_x, train_y, likelihood, n_decision_vars, n_context_vars):
         super().__init__(train_x, train_y, likelihood)

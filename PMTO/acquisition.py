@@ -31,7 +31,7 @@ def optimize_with_ehvi(models, pareto_front, nadir_point, input_dim, x_mean=None
     ref_point = nadir_point.clone()
 
     # Add a small margin to the reference point to ensure it's worse than all observed points
-    margin = 0.1 * torch.abs(ref_point)
+    margin = 0.01 * torch.abs(ref_point)
     if minimize:
         ref_point = ref_point + margin  # For minimization, worse means larger
     else:
@@ -158,8 +158,8 @@ def optimize_with_ehvi(models, pareto_front, nadir_point, input_dim, x_mean=None
         acq_function=ehvi,
         bounds=bounds,
         q=1,
-        num_restarts=5,
-        raw_samples=512,
+        num_restarts=3,
+        raw_samples=128,
     )
 
     # Denormalize if needed
