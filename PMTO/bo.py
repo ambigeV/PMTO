@@ -1075,9 +1075,9 @@ class PSLMOBO(MultiObjectiveBayesianOptimization):
             rho=0.001,
             mobo_id=None,
             minimize=True,
-            coef_lcb=0.5,  # LCB coefficient for exploration
+            coef_lcb=0.001,  # LCB coefficient for exploration
             n_candidate=50,  # Number of candidates to sample from PS model
-            n_pref_update=5  # Number of preferences to sample per update
+            n_pref_update=1  # Number of preferences to sample per update
     ):
         super().__init__(
             objective_func=objective_func,
@@ -1348,7 +1348,7 @@ class PSLMOBO(MultiObjectiveBayesianOptimization):
                 bo_model.likelihood.train()
 
                 # Training loop
-                optimizer = torch.optim.Adam(model.parameters(), lr=0.01) \
+                optimizer = torch.optim.Adam(model.parameters(), lr=0.005) \
                     if bo_model.optimizer_type == 'adam' \
                     else torch.optim.LBFGS(model.parameters(), lr=0.1, max_iter=20)
 
@@ -1813,12 +1813,12 @@ class ContextualMultiObjectiveBayesianOptimization:
     ):
         self.objective_func = objective_func
         self.input_dim = objective_func.input_dim
-        self.output_dim = objective_func.output_dim
         self.context_dim = objective_func.context_dim
         self.dim = self.input_dim + self.context_dim
         self.output_dim = objective_func.output_dim
         self.model_type = model_type
         self.contexts = None
+        # TODO: What is the intention for base_beta/beta/rho?
         self.base_beta = None
         self.beta = None
         self.rho = rho
@@ -1850,6 +1850,7 @@ class ContextualMultiObjectiveBayesianOptimization:
                 exponent=self.output_dim
             )
 
+        # Setup the upper threshold for the training steps
         new_train_steps = max(600, self.dim * train_steps)
         self.new_train_steps = new_train_steps
 
@@ -2395,6 +2396,30 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
 
             all_X_context = self.X_train[context_mask][:, :self.input_dim]
             all_Y_context = self.Y_train[context_mask]
+            num_uniform_weights = combined_front.shape[0]
+            uniform_weights = self._generate_uniform_weights(num_uniform_weights, self.output_dim)
+
+            for weight in uniform_weights:
+                scalarized_values = scalarization(all_Y_context, weight)
+                # Find the indices of the top p% solutions according to this weight vector
+                num_to_select = max(1, int(len(scalarized_values) * top_p))
+                _, top_indices = torch.topk(scalarized_values, num_to_select, largest=False)
+                # Combine context and weight for VAE conditioning
+                combined_context = torch.cat([context[1:], weight])
+
+                combined_contexts.append(combined_context)
+
+                # Efficiently select solutions and replicate contexts in one shot
+                selected_X = all_X_context[top_indices]
+                selected_Y = all_Y_context[top_indices]
+
+                # Replicate the context for each selected solution
+                replicated_context = combined_context.unsqueeze(0).expand(num_to_select, -1)
+
+                # Add to our lists
+                augmented_vae_sets.append(selected_X)
+                augmented_vae_fronts.append(selected_Y)
+                augmented_contexts.append(replicated_context)
 
             for y_value in combined_front:
                 weight = self.compute_weight_from_solution(y_value, reference_point, context_key)
