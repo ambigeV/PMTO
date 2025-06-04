@@ -2670,50 +2670,46 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
 
             return vae_model.logs
 
+        # Enhanced training wrapper with focused logging on mutual info and aggressive epochs
         def train_with_aggressive_callback(vae_model, X, contexts, callback=None):
-            """Enhanced training with aggressive training support and comprehensive logging"""
+            """Enhanced training wrapper that focuses on mutual info and aggressive epoch logging"""
 
-            # Hook into the enhanced train method that includes aggressive training
-            original_train = vae_model.train
+            # Call the trainer's native train method with callback
+            logs = vae_model.train(X=X, contexts=contexts, callback=callback)
 
-            def enhanced_train_wrapper(X, contexts):
-                # Call the actual enhanced train method
-                logs = original_train(X=X, contexts=contexts)
+            # Focused post-training logging for mutual info and aggressive epochs
+            if callback and logs:
+                final_epoch = len(logs.get('loss', [])) - 1 if 'loss' in logs else 0
 
-                # Add comprehensive callback logging throughout training
-                if callback:
-                    # Log final epoch metrics
-                    final_epoch = len(logs.get('loss', [])) - 1
-                    if final_epoch >= 0:
-                        final_metrics = {}
-                        for key, values in logs.items():
-                            if isinstance(values, list) and len(values) > 0:
-                                final_metrics[key] = values[-1]
-                            else:
-                                final_metrics[key] = values
+                # Log mutual information progression
+                if 'mutual_info' in logs and logs['mutual_info']:
+                    for epoch_idx, mi in enumerate(logs['mutual_info']):
+                        callback.writer.add_scalar(f"{callback.prefix}/mutual_info_progression",
+                                                   mi, epoch_idx)
 
-                        callback.after_epoch(final_epoch, final_metrics)
+                    # Log final mutual information
+                    final_mi = logs['mutual_info'][-1]
+                    callback.writer.add_scalar(f"{callback.prefix}/final_mutual_info",
+                                               final_mi, final_epoch)
 
-                    # Log aggressive training summary
-                    if 'aggressive_epochs' in logs and logs['aggressive_epochs']:
-                        aggressive_epochs_used = len(logs['aggressive_epochs'])
-                        callback.writer.add_scalar(f"{callback.prefix}/total_aggressive_epochs",
-                                                   aggressive_epochs_used, final_epoch)
+                    # Log training success indicator
+                    success = 1.0 if final_mi > 0.1 else 0.0
+                    callback.writer.add_scalar(f"{callback.prefix}/training_success",
+                                               success, final_epoch)
 
-                    # Log mutual information progression
-                    if 'mutual_info' in logs and logs['mutual_info']:
-                        for epoch_idx, mi in enumerate(logs['mutual_info']):
-                            callback.writer.add_scalar(f"{callback.prefix}/mutual_info_progression",
-                                                       mi, epoch_idx)
-                            # Also log aggressive phase indicator
-                            is_aggressive = epoch_idx in logs.get('aggressive_epochs', [])
-                            callback.writer.add_scalar(f"{callback.prefix}/aggressive_phase",
-                                                       1.0 if is_aggressive else 0.0, epoch_idx)
+                # Log aggressive training statistics
+                if 'aggressive_epochs' in logs and logs['aggressive_epochs']:
+                    aggressive_epochs_used = len(logs['aggressive_epochs'])
+                    callback.writer.add_scalar(f"{callback.prefix}/total_aggressive_epochs",
+                                               aggressive_epochs_used, final_epoch)
 
-                return logs
+                    # Log aggressive phase indicator for each epoch
+                    for epoch_idx in range(final_epoch + 1):
+                        is_aggressive = epoch_idx in logs.get('aggressive_epochs', [])
+                        callback.writer.add_scalar(f"{callback.prefix}/aggressive_phase",
+                                                   1.0 if is_aggressive else 0.0, epoch_idx)
 
-            # Execute the enhanced training
-            return enhanced_train_wrapper(X, contexts)
+            return logs
 
         if full_training:
             # Full training
@@ -2726,7 +2722,7 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
         else:
             # Incremental training
             original_epochs = self.vae_model.epochs
-            self.vae_model.epochs = max(10, int(original_epochs * 0.3))  # Use fewer epochs for incremental updates
+            self.vae_model.epochs = max(30, int(original_epochs * 0.3))  # Use fewer epochs for incremental updates
             # self.vae_model.train(X=X_train, contexts=contexts_train)
             # train_with_callback(self.vae_model, X_train, contexts_train, tensorboard_callback)
             train_with_aggressive_callback(self.vae_model, X_train, contexts_train, tensorboard_callback)

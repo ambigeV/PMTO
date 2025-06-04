@@ -226,6 +226,26 @@ class ParetoVAETrainer:
 
         # Training logs
         self.logs = defaultdict(list)
+        self._initialize_logs()
+
+    def _initialize_logs(self):
+        """Initialize all log containers to prevent KeyError"""
+        # Standard training logs
+        log_keys = [
+            'loss', 'mse', 'kld', 'mutual_info',
+            'grad_norm', 'max_grad', 'min_grad',
+            # Aggressive training logs
+            'aggressive_loss', 'aggressive_encoder_loss', 'aggressive_decoder_loss',
+            'aggressive_mse', 'aggressive_kld', 'aggressive_epochs',
+            # FIXED: Missing gradient logs
+            'aggressive_encoder_grad_norm', 'aggressive_encoder_grad_max', 'aggressive_encoder_grad_min',
+            'aggressive_decoder_grad_norm', 'aggressive_decoder_grad_max', 'aggressive_decoder_grad_min',
+            # Standard training gradient logs (for consistency)
+            'standard_grad_norm', 'standard_grad_max', 'standard_grad_min'
+        ]
+
+        for key in log_keys:
+            self.logs[key] = []
 
     # New: To compute the lagging inference network (Encoder) to avoid
     # posterior collapse?
@@ -308,12 +328,18 @@ class ParetoVAETrainer:
         MSE = torch.nn.functional.mse_loss(recon_x, x, reduction='sum')
         return MSE / x.size(0)
 
-    def aggressive_encoder_training(self, data_loader, num_updates=5):
+    def aggressive_encoder_training(self, data_loader, num_updates=5, epoch=0, callback=None):
         """Perform aggressive encoder training"""
         self.model.train()
 
+        # Initialize metrics tracking
+        total_encoder_loss = 0
+        total_mse = 0
+        total_kld = 0
+        total_batches = 0
+
         for update in range(num_updates):
-            for batch in data_loader:
+            for batch_idx, batch in enumerate(data_loader):
                 if self.conditional:
                     x, c = batch
                     x, c = x.to(self.device), c.to(self.device)
@@ -329,18 +355,50 @@ class ParetoVAETrainer:
                 encoder_loss, mse, kld = self.encoder_loss_fn(x, c)
                 encoder_loss.backward()
 
+                # Monitor gradients during aggressive training following callback pattern
+                if callback and batch_idx % max(1, len(data_loader) // 5) == 0:
+                    grad_total, grad_max, grad_min = self.monitor_gradients(epoch, batch_idx, mode='aggressive')
+                    callback.log_gradients({
+                        'encoder_total_norm': grad_total,
+                        'encoder_max_norm': grad_max,
+                        'encoder_min_norm': grad_min
+                    })
+
                 # Only step encoder optimizer
                 self.encoder_optimizer.step()
                 self.encoder_scheduler.step()
 
-    def standard_decoder_training(self, data_loader):
+                # DUSTINDUSTIN: Track batch results following callback pattern
+                if callback:
+                    callback.after_batch(total_batches, {
+                        'encoder_loss': encoder_loss.item(),
+                        'mse': mse.item(),
+                        'kld': kld.item()
+                    })
+
+                # Track metrics
+                total_encoder_loss += encoder_loss.item()
+                total_mse += mse.item()
+                total_kld += kld.item()
+                total_batches += 1
+
+        # Calculate averages
+        avg_metrics = {
+            'encoder_loss': total_encoder_loss / total_batches,
+            'mse': total_mse / total_batches,
+            'kld': total_kld / total_batches
+        }
+
+        return avg_metrics
+
+    def standard_decoder_training(self, data_loader, epoch=0, callback=None):
         """Perform standard decoder training"""
         self.model.train()
 
         epoch_decoder_loss = 0
         num_batches = 0
 
-        for batch in data_loader:
+        for batch_idx, batch in enumerate(data_loader):
             if self.conditional:
                 x, c = batch
                 x, c = x.to(self.device), c.to(self.device)
@@ -356,16 +414,31 @@ class ParetoVAETrainer:
             decoder_loss = self.decoder_loss_fn(x, c)
             decoder_loss.backward()
 
+            # Monitor gradients during decoder training following callback pattern
+            if callback and batch_idx % max(1, len(data_loader) // 5) == 0:
+                grad_total, grad_max, grad_min = self.monitor_gradients(epoch, batch_idx, mode='aggressive_decoder')
+                callback.log_gradients({
+                    'decoder_total_norm': grad_total,
+                    'decoder_max_norm': grad_max,
+                    'decoder_min_norm': grad_min
+                })
+
             # Only step decoder optimizer
             self.decoder_optimizer.step()
             self.decoder_scheduler.step()
+
+            # Track batch results following callback pattern
+            if callback:
+                callback.after_batch(num_batches, {
+                    'decoder_loss': decoder_loss.item()
+                })
 
             epoch_decoder_loss += decoder_loss.item()
             num_batches += 1
 
         return epoch_decoder_loss / num_batches
 
-    def monitor_gradients(self, epoch=0, iteration=0):
+    def monitor_gradients(self, epoch=0, iteration=0, mode=None):
         """Monitor gradients to detect exploding or vanishing issues"""
         # Calculate and store gradient norms
         total_norm = 0
@@ -373,28 +446,56 @@ class ParetoVAETrainer:
         min_norm = float('inf')
         layer_norms = {}
 
-        for name, param in self.model.named_parameters():
-            if param.grad is not None:
-                param_norm = param.grad.data.norm(2).item()
-                total_norm += param_norm ** 2
+        # Define which parameters to monitor based on mode
+        if mode == 'aggressive':
+            # Only monitor encoder parameters (encoder.*)
+            target_parameters = [(name, param) for name, param in self.model.named_parameters()
+                                 if name.startswith('encoder.') and param.grad is not None]
+            mode_prefix = "Encoder"
+        elif mode == 'aggressive_decoder':
+            # Only monitor decoder parameters (decoder.*)
+            target_parameters = [(name, param) for name, param in self.model.named_parameters()
+                                 if name.startswith('decoder.') and param.grad is not None]
+            mode_prefix = "Decoder"
+        else:
+            # Monitor all parameters for standard training
+            target_parameters = [(name, param) for name, param in self.model.named_parameters()
+                                 if param.grad is not None]
+            mode_prefix = "All"
 
-                max_norm = max(max_norm, param_norm)
-                min_norm = min(min_norm, param_norm if param_norm > 0 else float('inf'))
-                layer_norms[name] = param_norm
+        # Calculate gradient norms for the relevant parameters
+        for name, param in target_parameters:
+            param_norm = param.grad.data.norm(2).item()
+            total_norm += param_norm ** 2
+
+            max_norm = max(max_norm, param_norm)
+            min_norm = min(min_norm, param_norm if param_norm > 0 else float('inf'))
+            layer_norms[name] = param_norm
 
         total_norm = total_norm ** 0.5
 
-        # Store in logs
-        if 'grad_norm' not in self.logs:
-            self.logs['grad_norm'] = []
-        if 'max_grad' not in self.logs:
-            self.logs['max_grad'] = []
-        if 'min_grad' not in self.logs:
-            self.logs['min_grad'] = []
+        if mode == 'aggressive':
+            # Store encoder-specific gradients during aggressive encoder training
+            self.logs['aggressive_encoder_grad_norm'].append(total_norm)
+            self.logs['aggressive_encoder_grad_max'].append(max_norm)
+            self.logs['aggressive_encoder_grad_min'].append(min_norm)
+        elif mode == 'aggressive_decoder':
+            # Store decoder-specific gradients during aggressive decoder training
+            self.logs['aggressive_decoder_grad_norm'].append(total_norm)
+            self.logs['aggressive_decoder_grad_max'].append(max_norm)
+            self.logs['aggressive_decoder_grad_min'].append(min_norm)
+        else:
+            # Store standard training gradients (all parameters)
+            if 'grad_norm' not in self.logs:
+                self.logs['grad_norm'] = []
+            if 'max_grad' not in self.logs:
+                self.logs['max_grad'] = []
+            if 'min_grad' not in self.logs:
+                self.logs['min_grad'] = []
 
-        self.logs['grad_norm'].append(total_norm)
-        self.logs['max_grad'].append(max_norm)
-        self.logs['min_grad'].append(min_norm)
+            self.logs['grad_norm'].append(total_norm)
+            self.logs['max_grad'].append(max_norm)
+            self.logs['min_grad'].append(min_norm)
 
         # Detect issues
         if total_norm > 10.0:  # Threshold for exploding gradients
@@ -472,7 +573,7 @@ class ParetoVAETrainer:
             shuffle=True
         )
 
-    def train(self, X, Y=None, contexts=None):
+    def train(self, X, Y=None, contexts=None, callback=None):
         """
         Train the VAE model.
 
@@ -505,11 +606,17 @@ class ParetoVAETrainer:
 
                 print(f"Epoch {epoch + 1}: Aggressive training (MI: {current_mi:.4f})")
 
-                # Aggressive encoder updates (inner loop)
-                self.aggressive_encoder_training(data_loader, num_updates=5)
+                # NEW: Enhanced aggressive training with logging
+                encoder_metrics = self.aggressive_encoder_training(data_loader, num_updates=5, epoch=epoch, callback=callback)
+                decoder_loss = self.standard_decoder_training(data_loader, epoch=epoch, callback=callback)
 
-                # Single decoder update
-                decoder_loss = self.standard_decoder_training(data_loader)
+                # NEW: Store aggressive training metrics
+                combined_loss = encoder_metrics['encoder_loss'] + decoder_loss
+                self.logs['aggressive_loss'].append(combined_loss)
+                self.logs['aggressive_encoder_loss'].append(encoder_metrics['encoder_loss'])
+                self.logs['aggressive_decoder_loss'].append(decoder_loss)
+                self.logs['aggressive_mse'].append(encoder_metrics['mse'])
+                self.logs['aggressive_kld'].append(encoder_metrics['kld'])
 
                 # Check stopping criterion: if MI stops climbing, stop aggressive training
                 if current_mi <= prev_mi + 1e-4:  # Small threshold for MI improvement
@@ -520,6 +627,23 @@ class ParetoVAETrainer:
 
                 # Log aggressive training metrics
                 self.logs['aggressive_epochs'].append(epoch)
+
+                print(f"  Encoder Loss: {encoder_metrics['encoder_loss']:.4f}")
+                print(f"  Decoder Loss: {decoder_loss:.4f}")
+                print(f"  Combined Loss: {combined_loss:.4f}")
+
+                if callback:
+                    combined_loss = encoder_metrics['encoder_loss'] + decoder_loss
+                    epoch_metrics = {
+                        'mutual_info': current_mi,
+                        'loss': combined_loss,  # Shared name with standard training
+                        'mse': encoder_metrics['mse'],  # Shared name with standard training
+                        'kld': encoder_metrics['kld'],  # Shared name with standard training
+                        'encoder_loss': encoder_metrics['encoder_loss'],
+                        'decoder_loss': decoder_loss,
+                        'training_mode': 'aggressive'
+                    }
+                    callback.after_epoch(epoch, epoch_metrics)
 
             else:
                 # Standard VAE training (both encoder and decoder together)
@@ -552,11 +676,28 @@ class ParetoVAETrainer:
                     self.optimizer.zero_grad()
                     loss.backward()
 
-                    # Monitor gradients
+                    # Monitor gradients following callback pattern for standard training
                     if (iteration + 1) % max(1, len(data_loader) // 5) == 0:
-                        grad_total, grad_max, grad_min = self.monitor_gradients(epoch, iteration)
+                        grad_total, grad_max, grad_min = self.monitor_gradients(epoch, iteration, mode='standard')
+
+                        # Log gradients following callback pattern
+                        if callback:
+                            callback.log_gradients({
+                                'total_norm': grad_total,
+                                'max_norm': grad_max,
+                                'min_norm': grad_min
+                            })
+
                     self.optimizer.step()
                     self.scheduler.step()
+
+                    # Track batch results following callback pattern for standard training
+                    if callback:
+                        callback.after_batch(iteration, {
+                            'loss': loss.item(),
+                            'mse': mse.item(),
+                            'kld': kld.item()
+                        })
 
                     # Track results
                     epoch_loss += loss.item()
@@ -573,13 +714,22 @@ class ParetoVAETrainer:
                         print(f"Epoch {epoch + 1}/{self.epochs}, Batch {iteration + 1}/{len(data_loader)}, "
                               f"Loss: {loss.item():.4f}")
 
-            # End of epoch
-            if not self.aggressive_phase:
+
                 avg_loss = epoch_loss / len(data_loader)
                 self.logs['loss'].append(avg_loss)
                 self.logs['mse'].append(epoch_mse / len(data_loader))
                 self.logs['kld'].append(epoch_kld / len(data_loader))
                 print(f"Epoch {epoch + 1}/{self.epochs} completed, Avg Loss: {avg_loss:.4f}")
+
+                if callback:
+                    epoch_metrics = {
+                        'mutual_info': current_mi,
+                        'loss': avg_loss,  # DUSTIN: Shared name with aggressive training
+                        'mse': epoch_mse / len(data_loader),  # DUSTIN: Shared name with aggressive training
+                        'kld': epoch_kld / len(data_loader),  # DUSTIN: Shared name with aggressive training
+                        'training_mode': 'standard'
+                    }
+                    callback.after_epoch(epoch, epoch_metrics)
 
             prev_mi = current_mi
             # Visualize results periodically
@@ -805,3 +955,4 @@ if __name__ == "__main__":
     print(f"Generated solutions shape: {new_solutions.shape}")
     print("Sample solution:")
     print(new_solutions[0])
+
