@@ -149,8 +149,11 @@ class ParetoVAETrainer:
                  batch_size=64,
                  epochs=100,
                  device=None,
-                 trainer_id = None,
-                 save_dir='./results'):
+                 trainer_id=None,
+                 save_dir='./results',
+                 # NEW: Aggressive training parameters
+                 aggressive_training=True,
+                 max_aggressive_epochs=5):
 
         self.input_dim = input_dim
         self.output_dim = output_dim
@@ -161,6 +164,12 @@ class ParetoVAETrainer:
         self.batch_size = batch_size
         self.epochs = epochs
         self.save_dir = save_dir
+
+        # NEW: Aggressive training settings
+        self.aggressive_training = aggressive_training
+        self.max_aggressive_epochs = max_aggressive_epochs
+        self.current_aggressive_epoch = 0
+        self.aggressive_phase = True
 
         # Determine device
         self.device = device if device else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -186,7 +195,29 @@ class ParetoVAETrainer:
             context_size=context_dim
         ).to(self.device)
 
+        # MODIFIED: Create separate optimizers for encoder and decoder
+        # MODIFIED: Create separate optimizers for encoder and decoder
+        self.encoder_optimizer = torch.optim.Adam(
+            self.model.encoder.parameters(),  # This includes MLP, linear_means, and linear_log_var
+            lr=learning_rate
+        )
+        self.decoder_optimizer = torch.optim.Adam(
+            self.model.decoder.parameters(),
+            lr=learning_rate
+        )
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate)
+
+        # Schedulers for all optimizers
+        self.encoder_scheduler = torch.optim.lr_scheduler.MultiStepLR(
+            self.encoder_optimizer,
+            milestones=[int(self.epochs * 0.5), int(self.epochs * 0.75)],
+            gamma=0.1
+        )
+        self.decoder_scheduler = torch.optim.lr_scheduler.MultiStepLR(
+            self.decoder_optimizer,
+            milestones=[int(self.epochs * 0.5), int(self.epochs * 0.75)],
+            gamma=0.1
+        )
         self.scheduler = torch.optim.lr_scheduler.MultiStepLR(
             self.optimizer,
             milestones=[int(self.epochs * 0.5), int(self.epochs * 0.75)],
@@ -195,6 +226,144 @@ class ParetoVAETrainer:
 
         # Training logs
         self.logs = defaultdict(list)
+
+    # New: To compute the lagging inference network (Encoder) to avoid
+    # posterior collapse?
+    def compute_mutual_information(self, data_loader):
+        """
+        Compute mutual information I_q = E_x[KL(q(z|x)||p(z))] - KL(q(z)||p(z))
+        """
+        self.model.eval()
+
+        kl_term = 0
+        all_means = []
+        all_log_vars = []
+        total_samples = 0
+
+        with torch.no_grad():
+            for batch in data_loader:
+                if self.conditional:
+                    x, c = batch
+                    x, c = x.to(self.device), c.to(self.device)
+                    _, mean, log_var, z = self.model(x, c)
+                else:
+                    x = batch[0].to(self.device)
+                    _, mean, log_var, z = self.model(x)
+
+                # E_x[KL(q(z|x)||p(z))] - this is the KL divergence in our loss
+                batch_kl = -0.5 * torch.sum(1 + log_var - mean.pow(2) - log_var.exp(), dim=1)
+                kl_term += torch.sum(batch_kl)
+                total_samples += x.size(0)
+
+                # Collect mean and log_var for aggregated posterior
+                all_means.append(mean)
+                all_log_vars.append(log_var)
+
+        # Average KL divergence: E_x[KL(q(z|x)||p(z))]
+        kl_term = kl_term / total_samples
+
+        # Compute KL(q(z)||p(z)) where q(z) is the aggregated posterior
+        # q(z) ≈ (1/N) Σ q(z|x_i) with mean = (1/N) Σ μ_i, var = (1/N) Σ (σ_i^2 + μ_i^2) - μ_agg^2
+        all_means = torch.cat(all_means, dim=0)  # [N, latent_dim]
+        all_log_vars = torch.cat(all_log_vars, dim=0)  # [N, latent_dim]
+        all_vars = torch.exp(all_log_vars)  # Convert log_var to var
+
+        # Aggregated posterior statistics
+        mu_agg = torch.mean(all_means, dim=0)  # [latent_dim]
+        var_agg = torch.mean(all_vars + all_means.pow(2), dim=0) - mu_agg.pow(2)  # [latent_dim]
+
+        # KL(q(z)||p(z)) where p(z) = N(0,I)
+        # KL(N(μ,Σ)||N(0,I)) = 0.5 * (tr(Σ) + μ^T μ - k - log|Σ|)
+        # For diagonal covariance: KL = 0.5 * Σ(σ_i^2 + μ_i^2 - 1 - log(σ_i^2))
+        aggregated_kl = 0.5 * torch.sum(var_agg + mu_agg.pow(2) - 1 - torch.log(var_agg + 1e-8))
+
+        mutual_info = kl_term - aggregated_kl
+        self.model.train()
+        return mutual_info.item()
+
+    def encoder_loss_fn(self, x, c=None):
+        """Compute encoder-only loss (reconstruction + KL)"""
+        if self.conditional and c is not None:
+            recon_x, mean, log_var, z = self.model(x, c)
+        else:
+            recon_x, mean, log_var, z = self.model(x)
+
+        # MSE reconstruction loss
+        MSE = torch.nn.functional.mse_loss(recon_x, x, reduction='sum')
+        # KL divergence
+        KLD = -0.5 * torch.sum(1 + log_var - mean.pow(2) - log_var.exp())
+        beta = 1.0
+
+        total_loss = (MSE + beta * KLD) / x.size(0)
+        return total_loss, MSE / x.size(0), KLD / x.size(0)
+
+    def decoder_loss_fn(self, x, c=None):
+        """Compute decoder-only loss (reconstruction)"""
+        if self.conditional and c is not None:
+            recon_x, mean, log_var, z = self.model(x, c)
+        else:
+            recon_x, mean, log_var, z = self.model(x)
+
+        # Only reconstruction loss for decoder
+        MSE = torch.nn.functional.mse_loss(recon_x, x, reduction='sum')
+        return MSE / x.size(0)
+
+    def aggressive_encoder_training(self, data_loader, num_updates=5):
+        """Perform aggressive encoder training"""
+        self.model.train()
+
+        for update in range(num_updates):
+            for batch in data_loader:
+                if self.conditional:
+                    x, c = batch
+                    x, c = x.to(self.device), c.to(self.device)
+                else:
+                    x = batch[0].to(self.device)
+                    c = None
+
+                # IMPORTANT: Zero gradients for ALL optimizers
+                self.encoder_optimizer.zero_grad()
+                self.decoder_optimizer.zero_grad()
+
+                # Only update encoder parameters
+                encoder_loss, mse, kld = self.encoder_loss_fn(x, c)
+                encoder_loss.backward()
+
+                # Only step encoder optimizer
+                self.encoder_optimizer.step()
+                self.encoder_scheduler.step()
+
+    def standard_decoder_training(self, data_loader):
+        """Perform standard decoder training"""
+        self.model.train()
+
+        epoch_decoder_loss = 0
+        num_batches = 0
+
+        for batch in data_loader:
+            if self.conditional:
+                x, c = batch
+                x, c = x.to(self.device), c.to(self.device)
+            else:
+                x = batch[0].to(self.device)
+                c = None
+
+            # IMPORTANT: Zero gradients for ALL optimizers
+            self.encoder_optimizer.zero_grad()
+            self.decoder_optimizer.zero_grad()
+
+            # Only update decoder parameters
+            decoder_loss = self.decoder_loss_fn(x, c)
+            decoder_loss.backward()
+
+            # Only step decoder optimizer
+            self.decoder_optimizer.step()
+            self.decoder_scheduler.step()
+
+            epoch_decoder_loss += decoder_loss.item()
+            num_batches += 1
+
+        return epoch_decoder_loss / num_batches
 
     def monitor_gradients(self, epoch=0, iteration=0):
         """Monitor gradients to detect exploding or vanishing issues"""
@@ -317,66 +486,102 @@ class ParetoVAETrainer:
         """
         data_loader = self.prepare_data(X=X, contexts=contexts)
 
+        # Track mutual information to decide when to stop aggressive training
+        prev_mi = 0
+
         for epoch in range(self.epochs):
             epoch_loss = 0
             epoch_mse = 0
             epoch_kld = 0
 
-            # For visualization of latent space
-            latent_points = []
-            latent_contexts = []
+            # Compute mutual information to decide training strategy
+            current_mi = self.compute_mutual_information(data_loader)
+            self.logs['mutual_info'].append(current_mi)
 
-            for iteration, batch in enumerate(data_loader):
-                # Unpack batch
-                if self.conditional:
-                    x, c = batch
-                    # print(batch[0].shape)
-                    x, c = x.to(self.device), c.to(self.device)
-                else:
-                    x = batch[0].to(self.device)
-                    c = None
+            # Decide whether to use aggressive training
+            if (self.aggressive_training and
+                    self.aggressive_phase and
+                    self.current_aggressive_epoch < self.max_aggressive_epochs):
 
-                # Forward pass
-                if self.conditional:
-                    recon_x, mean, log_var, z = self.model(x, c)
-                else:
-                    recon_x, mean, log_var, z = self.model(x)
+                print(f"Epoch {epoch + 1}: Aggressive training (MI: {current_mi:.4f})")
 
-                # Calculate loss
-                loss, mse, kld = self.loss_fn(recon_x, x, mean, log_var)
+                # Aggressive encoder updates (inner loop)
+                self.aggressive_encoder_training(data_loader, num_updates=5)
 
-                # Backward pass
-                self.optimizer.zero_grad()
-                loss.backward()
-                # Monitor gradients
-                if (iteration + 1) % max(1, len(data_loader) // 5) == 0:
-                    grad_total, grad_max, grad_min = self.monitor_gradients(epoch, iteration)
-                self.optimizer.step()
-                self.scheduler.step()
+                # Single decoder update
+                decoder_loss = self.standard_decoder_training(data_loader)
 
-                # Track results
-                epoch_loss += loss.item()
-                epoch_mse += mse.item()
-                epoch_kld += kld.item()
+                # Check stopping criterion: if MI stops climbing, stop aggressive training
+                if current_mi <= prev_mi + 1e-4:  # Small threshold for MI improvement
+                    self.aggressive_phase = False
+                    print(f"Stopping aggressive training at epoch {epoch + 1} (MI plateaued)")
 
-                # Store latent points for visualization
-                latent_points.append(z.detach().cpu().numpy())
-                if self.conditional:
-                    latent_contexts.append(c.detach().cpu().numpy())
+                self.current_aggressive_epoch += 1
 
-                # Print progress
-                if (iteration + 1) % max(1, len(data_loader) // 5) == 0:
-                    print(f"Epoch {epoch + 1}/{self.epochs}, Batch {iteration + 1}/{len(data_loader)}, "
-                          f"Loss: {loss.item():.4f}")
+                # Log aggressive training metrics
+                self.logs['aggressive_epochs'].append(epoch)
+
+            else:
+                # Standard VAE training (both encoder and decoder together)
+                print(f"Epoch {epoch + 1}: Standard training (MI: {current_mi:.4f})")
+
+                # For visualization of latent space
+                latent_points = []
+                latent_contexts = []
+
+                for iteration, batch in enumerate(data_loader):
+                    # Unpack batch
+                    if self.conditional:
+                        x, c = batch
+                        # print(batch[0].shape)
+                        x, c = x.to(self.device), c.to(self.device)
+                    else:
+                        x = batch[0].to(self.device)
+                        c = None
+
+                    # Forward pass
+                    if self.conditional:
+                        recon_x, mean, log_var, z = self.model(x, c)
+                    else:
+                        recon_x, mean, log_var, z = self.model(x)
+
+                    # Calculate loss
+                    loss, mse, kld = self.loss_fn(recon_x, x, mean, log_var)
+
+                    # Backward pass
+                    self.optimizer.zero_grad()
+                    loss.backward()
+
+                    # Monitor gradients
+                    if (iteration + 1) % max(1, len(data_loader) // 5) == 0:
+                        grad_total, grad_max, grad_min = self.monitor_gradients(epoch, iteration)
+                    self.optimizer.step()
+                    self.scheduler.step()
+
+                    # Track results
+                    epoch_loss += loss.item()
+                    epoch_mse += mse.item()
+                    epoch_kld += kld.item()
+
+                    # Store latent points for visualization
+                    latent_points.append(z.detach().cpu().numpy())
+                    if self.conditional:
+                        latent_contexts.append(c.detach().cpu().numpy())
+
+                    # Print progress
+                    if (iteration + 1) % max(1, len(data_loader) // 5) == 0:
+                        print(f"Epoch {epoch + 1}/{self.epochs}, Batch {iteration + 1}/{len(data_loader)}, "
+                              f"Loss: {loss.item():.4f}")
 
             # End of epoch
+            if not self.aggressive_phase:
+                avg_loss = epoch_loss / len(data_loader)
+                self.logs['loss'].append(avg_loss)
+                self.logs['mse'].append(epoch_mse / len(data_loader))
+                self.logs['kld'].append(epoch_kld / len(data_loader))
+                print(f"Epoch {epoch + 1}/{self.epochs} completed, Avg Loss: {avg_loss:.4f}")
 
-            avg_loss = epoch_loss / len(data_loader)
-            self.logs['loss'].append(avg_loss)
-            self.logs['mse'].append(epoch_mse / len(data_loader))
-            self.logs['kld'].append(epoch_kld / len(data_loader))
-            print(f"Epoch {epoch + 1}/{self.epochs} completed, Avg Loss: {avg_loss:.4f}")
-
+            prev_mi = current_mi
             # Visualize results periodically
             # if (epoch + 1) % max(1, self.epochs // 10) == 0:
             #     self._visualize_results(epoch, latent_points, latent_contexts)
