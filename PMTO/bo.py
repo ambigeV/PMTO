@@ -2549,7 +2549,10 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
                 self.epoch = epoch
                 # Log training metrics
                 for key, value in logs.items():
-                    self.writer.add_scalar(f"{self.prefix}/{key}", value, epoch)
+                    if isinstance(value, list) and len(value) > 0:
+                        self.writer.add_scalar(f"{self.prefix}/{key}", value[-1], epoch)
+                    else:
+                        self.writer.add_scalar(f"{self.prefix}/{key}", value, epoch)
 
             def after_batch(self, batch_idx, logs):
                 # Log batch-level metrics
@@ -2562,8 +2565,16 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
                 for key, value in grad_stats.items():
                     self.writer.add_scalar(f"{self.prefix}/grad_{key}", value, self.epoch)
 
+            def log_aggressive_phase(self, is_aggressive, mutual_info):
+                # Log whether we're in aggressive training phase
+                self.writer.add_scalar(f"{self.prefix}/aggressive_phase",
+                                       1.0 if is_aggressive else 0.0, self.epoch)
+                self.writer.add_scalar(f"{self.prefix}/mutual_information",
+                                       mutual_info, self.epoch)
+
         # Instantiate callback
-        tensorboard_callback = TensorBoardCallback(writer, prefix="VAE_training")
+        # tensorboard_callback = TensorBoardCallback(writer, prefix="VAE_training")
+        tensorboard_callback = TensorBoardCallback(writer, prefix="VAE_aggresive_training")
 
         if len(X_train) < self.vae_min_data_points:
             print(f"Not enough data points for VAE training ({len(X_train)} < {self.vae_min_data_points})")
@@ -2580,7 +2591,10 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
                 conditional=True,
                 epochs=self.vae_epochs,
                 batch_size=min(self.vae_batch_size, len(X_train)),
-                trainer_id=f"CMOBO_VAE_{iteration}"
+                trainer_id=f"CMOBO_VAE_{iteration}",
+                # NEW: Enable aggressive training
+                aggressive_training=True,
+                max_aggressive_epochs=min(5, self.vae_epochs // 2)  # Use aggressive training for first half
             )
             full_training = True  # Always do full training for new model
         else:
@@ -2656,21 +2670,81 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
 
             return vae_model.logs
 
+        def train_with_aggressive_callback(vae_model, X, contexts, callback=None):
+            """Enhanced training with aggressive training support and comprehensive logging"""
+
+            # Hook into the enhanced train method that includes aggressive training
+            original_train = vae_model.train
+
+            def enhanced_train_wrapper(X, contexts):
+                # Call the actual enhanced train method
+                logs = original_train(X=X, contexts=contexts)
+
+                # Add comprehensive callback logging throughout training
+                if callback:
+                    # Log final epoch metrics
+                    final_epoch = len(logs.get('loss', [])) - 1
+                    if final_epoch >= 0:
+                        final_metrics = {}
+                        for key, values in logs.items():
+                            if isinstance(values, list) and len(values) > 0:
+                                final_metrics[key] = values[-1]
+                            else:
+                                final_metrics[key] = values
+
+                        callback.after_epoch(final_epoch, final_metrics)
+
+                    # Log aggressive training summary
+                    if 'aggressive_epochs' in logs and logs['aggressive_epochs']:
+                        aggressive_epochs_used = len(logs['aggressive_epochs'])
+                        callback.writer.add_scalar(f"{callback.prefix}/total_aggressive_epochs",
+                                                   aggressive_epochs_used, final_epoch)
+
+                    # Log mutual information progression
+                    if 'mutual_info' in logs and logs['mutual_info']:
+                        for epoch_idx, mi in enumerate(logs['mutual_info']):
+                            callback.writer.add_scalar(f"{callback.prefix}/mutual_info_progression",
+                                                       mi, epoch_idx)
+                            # Also log aggressive phase indicator
+                            is_aggressive = epoch_idx in logs.get('aggressive_epochs', [])
+                            callback.writer.add_scalar(f"{callback.prefix}/aggressive_phase",
+                                                       1.0 if is_aggressive else 0.0, epoch_idx)
+
+                return logs
+
+            # Execute the enhanced training
+            return enhanced_train_wrapper(X, contexts)
+
         if full_training:
             # Full training
             # self.vae_model.train(X=X_train, contexts=contexts_train)
             print(f"VAE fully trained at iteration {iteration} with {len(X_train)} points")
-            train_with_callback(self.vae_model, X_train, contexts_train, tensorboard_callback)
+            # train_with_callback(self.vae_model, X_train, contexts_train, tensorboard_callback)
             # print(f"VAE fully trained at iteration {iteration} with {len(X_train)} points")
+            train_with_aggressive_callback(self.vae_model, X_train, contexts_train, tensorboard_callback)
 
         else:
             # Incremental training
             original_epochs = self.vae_model.epochs
             self.vae_model.epochs = max(10, int(original_epochs * 0.3))  # Use fewer epochs for incremental updates
             # self.vae_model.train(X=X_train, contexts=contexts_train)
-            train_with_callback(self.vae_model, X_train, contexts_train, tensorboard_callback)
+            # train_with_callback(self.vae_model, X_train, contexts_train, tensorboard_callback)
+            train_with_aggressive_callback(self.vae_model, X_train, contexts_train, tensorboard_callback)
             self.vae_model.epochs = original_epochs  # Restore original setting
             print(f"VAE incrementally updated at iteration {iteration} with {len(X_train)} points")
+
+            # Log summary statistics
+        if hasattr(self.vae_model, 'logs') and 'mutual_info' in self.vae_model.logs:
+            final_mi = self.vae_model.logs['mutual_info'][-1] if self.vae_model.logs['mutual_info'] else 0
+            print(f"Final mutual information: {final_mi:.4f}")
+
+            # Check if posterior collapse was avoided
+            if final_mi > 0.1:  # Threshold for successful training
+                print("✓ Posterior collapse successfully avoided!")
+            else:
+                print("⚠ Warning: Low mutual information, potential posterior collapse")
+
+        writer.close()
 
     def generate_cvae_candidates(self, context, weight_vector, num_samples=500):
         """
