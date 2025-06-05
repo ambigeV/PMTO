@@ -2313,6 +2313,35 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
         self.X_train = None
         self.Y_train = None
 
+    def _generate_uniform_weights(self, num_uniform_weights: int, output_dim: int) -> torch.Tensor:
+        """
+        Generate uniformly distributed weight vectors using Dirichlet distribution.
+        Each weight vector sums to 1 and provides good coverage of the preference space.
+
+        Args:
+            num_uniform_weights: Number of weight vectors to generate
+            output_dim: Dimension of each weight vector (number of objectives)
+
+        Returns:
+            torch.Tensor: Shape (num_uniform_weights, output_dim) with each row summing to 1
+        """
+        import scipy.stats as stats
+
+        if output_dim == 1:
+            return torch.ones(num_uniform_weights, 1)
+
+        # Use symmetric Dirichlet distribution with alpha=1 for uniform distribution on simplex
+        # Dirichlet(1, 1, ..., 1) gives uniform distribution over the probability simplex
+        alpha = [1.0] * output_dim
+
+        # Generate samples using scipy's Dirichlet
+        dirichlet_samples = stats.dirichlet.rvs(alpha, size=num_uniform_weights)
+
+        # Convert to torch tensor
+        weights = torch.tensor(dirichlet_samples, dtype=torch.float32)
+
+        return weights
+
     def _update_pareto_front_for_context(self, X: torch.Tensor, Y: torch.Tensor, context: torch.Tensor):
         """
         Override the parent method to additionally collect rank-1 and rank-2 solutions for VAE training.
@@ -2728,17 +2757,6 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
             train_with_aggressive_callback(self.vae_model, X_train, contexts_train, tensorboard_callback)
             self.vae_model.epochs = original_epochs  # Restore original setting
             print(f"VAE incrementally updated at iteration {iteration} with {len(X_train)} points")
-
-            # Log summary statistics
-        if hasattr(self.vae_model, 'logs') and 'mutual_info' in self.vae_model.logs:
-            final_mi = self.vae_model.logs['mutual_info'][-1] if self.vae_model.logs['mutual_info'] else 0
-            print(f"Final mutual information: {final_mi:.4f}")
-
-            # Check if posterior collapse was avoided
-            if final_mi > 0.1:  # Threshold for successful training
-                print("✓ Posterior collapse successfully avoided!")
-            else:
-                print("⚠ Warning: Low mutual information, potential posterior collapse")
 
         writer.close()
 

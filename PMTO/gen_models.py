@@ -587,6 +587,10 @@ class ParetoVAETrainer:
         """
         data_loader = self.prepare_data(X=X, contexts=contexts)
 
+        self.max_aggressive_epochs = self.epochs // 2
+        self.current_aggressive_epoch = 0
+        self.aggressive_phase = True
+
         # Track mutual information to decide when to stop aggressive training
         prev_mi = 0
 
@@ -641,7 +645,6 @@ class ParetoVAETrainer:
                         'kld': encoder_metrics['kld'],  # Shared name with standard training
                         'encoder_loss': encoder_metrics['encoder_loss'],
                         'decoder_loss': decoder_loss,
-                        'training_mode': 'aggressive'
                     }
                     callback.after_epoch(epoch, epoch_metrics)
 
@@ -727,7 +730,6 @@ class ParetoVAETrainer:
                         'loss': avg_loss,  # DUSTIN: Shared name with aggressive training
                         'mse': epoch_mse / len(data_loader),  # DUSTIN: Shared name with aggressive training
                         'kld': epoch_kld / len(data_loader),  # DUSTIN: Shared name with aggressive training
-                        'training_mode': 'standard'
                     }
                     callback.after_epoch(epoch, epoch_metrics)
 
