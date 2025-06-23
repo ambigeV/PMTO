@@ -644,7 +644,7 @@ def diffuse_optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_o
                 print(f"Run {run + 1}, Context {i}: No Pareto front found")
 
         # Save individual run data
-        save_path = f'result/{problem_name}/DDIM-CMOBO_20steps_2_0.1_optimization_history_{timestamp}_run_{run}.pth'
+        save_path = f'result/{problem_name}/DDIM-CMOBO_20steps_200_8_2_0.1_optimization_history_{timestamp}_run_{run}.pth'
         torch.save(run_data, save_path)
         print(f"Run {run + 1} data saved to {save_path}")
 
@@ -668,7 +668,7 @@ def diffuse_optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_o
             ax.legend()
 
         plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-        plt.savefig(f'result/{problem_name}/DDIM-CMOBO_20steps_2_0.1_hypervolume_history_grid_{timestamp}_run_{run}.png')
+        plt.savefig(f'result/{problem_name}/DDIM-CMOBO_20steps_200_8_2_0.1_hypervolume_history_grid_{timestamp}_run_{run}.png')
         plt.close()
 
 
@@ -1227,24 +1227,39 @@ def main():
         )
 
     if args.method_name == "ALL":
-        optimization_loop_test(
+        vae_optimization_loop_test(
             problem_name=args.problem,
             n_runs=args.n_runs,
             n_iter=args.n_iter,
             n_objectives=args.n_objectives,
             n_variables=args.n_variables,
             temp_beta=args.beta,
-            model_type="ArdGP",
+            model_type=args.model_type,
         )
 
-        optimization_loop_test(
+        run_parego_test(
             problem_name=args.problem,
             n_runs=args.n_runs,
             n_iter=args.n_iter,
             n_objectives=args.n_objectives,
             n_variables=args.n_variables,
-            temp_beta=args.beta,
-            model_type="ExactGP",
+            rho=0.001,
+        )
+
+        run_pslmobo_test(
+            problem_name=args.problem,
+            n_runs=args.n_runs,
+            n_iter=args.n_iter,
+            n_objectives=args.n_objectives,
+            n_variables=args.n_variables,
+        )
+
+        run_ehvi_test(
+            problem_name=args.problem,
+            n_runs=args.n_runs,
+            n_iter=args.n_iter,
+            n_objectives=args.n_objectives,
+            n_variables=args.n_variables,
         )
 
         run_mobo_test(
@@ -1254,18 +1269,9 @@ def main():
             n_objectives=args.n_objectives,
             n_variables=args.n_variables,
             temp_beta=args.beta,
-            model_type="ArdGP",
+            model_type=args.model_type,
         )
 
-        run_mobo_test(
-            problem_name=args.problem,
-            n_runs=args.n_runs,
-            n_iter=args.n_iter,
-            n_objectives=args.n_objectives,
-            n_variables=args.n_variables,
-            temp_beta=args.beta,
-            model_type="ExactGP",
-        )
 
 
 if __name__ == "__main__":
