@@ -226,6 +226,12 @@ class ContextualMultiObjectiveFunction:
             n_variables=None,
             bounds=(0, 1)
     ):
+        """
+        :param func_name:       Name -> Evaluation
+        :param n_objectives:    The number of objectives
+        :param n_variables:     The number of decision variables
+        :param bounds:          Assume the x lying in [0, 1]^N
+        """
         self.func_name = func_name.lower()
         self.n_objectives = n_objectives
 
@@ -235,6 +241,8 @@ class ContextualMultiObjectiveFunction:
             'dtlz3': 5
         }[self.func_name]
 
+        # Determine n_variables in DLTZ-1/DTLZ-2/DLTZ-3
+        # Fix the context_dim
         if n_variables is None:
             self.n_variables = n_objectives + default_k - 1
         else:
@@ -249,6 +257,7 @@ class ContextualMultiObjectiveFunction:
         self.input_dim = self.n_variables
         self.output_dim = self.n_objectives
 
+        # Configuring the nadir point via an ad-hoc way?
         self.nadir_point = {
             'dtlz1': (160 + 100 * (self.n_variables - 2)) * torch.ones(self.n_objectives),
             'dtlz2': torch.ones(self.n_objectives) * 2.0,
@@ -265,6 +274,7 @@ class ContextualMultiObjectiveFunction:
         """
         Get shift value from first context dimension.
         Maps c[0] from [0,1] to [-0.2, 0.2]
+        Hint: Now we simplify the first dim to 0 for all the problems
         """
         # return 0.4 * c[:, 0] - 0.2  # First context dimension controls shift
         return 0 * c[:, 0]
@@ -273,6 +283,7 @@ class ContextualMultiObjectiveFunction:
         """
         Get power scaling from second context dimension.
         Maps c[1] from [0,1] to [0.8, 1.0]
+        Hint: Originally we set it up as 0 to 1 but the problems instantiated are dissimilar too much
         """
         return 0.8 + 0.2 * c[:, 1]  # Second context dimension controls power
         # return 0 * c[:, 1] + 1.0
@@ -285,7 +296,6 @@ class ContextualMultiObjectiveFunction:
         c_shift = self.get_context_shift(c)
         c_power = self.get_context_power(c)
         x_shifted = torch.pow(x_m - c_shift.unsqueeze(-1), c_power.unsqueeze(-1))
-
 
         return 100 * (x_m.shape[1] + torch.sum(
             (x_shifted - 0.5) ** 2 - torch.cos(20 * np.pi * (x_shifted - 0.5)),
