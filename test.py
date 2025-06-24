@@ -32,7 +32,7 @@ def test_bo():
 def parse_arguments():
     parser = argparse.ArgumentParser(description='Run DTLZ optimization experiments')
     parser.add_argument('--problem', type=str, default='dtlz2',
-                       choices=['dtlz1', 'dtlz2', 'dtlz3', 'dtlz4', 'dtlz5', 'dtlz6', 'dtlz7'],
+                       choices=['dtlz1', 'dtlz2', 'dtlz3', 'dtlz4', 'dtlz5', 'dtlz6', 'dtlz7', 'turbine'],
                        help='DTLZ problem to optimize (default: dtlz2)')
     parser.add_argument('--n_runs', type=int, default=1,
                        help='Number of optimization runs (default: 1)')
@@ -1263,6 +1263,16 @@ def main():
         )
 
         run_mobo_test(
+            problem_name=args.problem,
+            n_runs=args.n_runs,
+            n_iter=args.n_iter,
+            n_objectives=args.n_objectives,
+            n_variables=args.n_variables,
+            temp_beta=args.beta,
+            model_type=args.model_type,
+        )
+
+        optimization_loop_test(
             problem_name=args.problem,
             n_runs=args.n_runs,
             n_iter=args.n_iter,
