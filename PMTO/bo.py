@@ -1853,7 +1853,7 @@ class ContextualMultiObjectiveBayesianOptimization:
             )
 
         # Setup the upper threshold for the training steps
-        new_train_steps = max(600, self.dim * train_steps)
+        new_train_steps = min(max(600, self.dim * train_steps), 1000)
         self.new_train_steps = new_train_steps
 
         # Create individual BO models for each objective
