@@ -32,7 +32,8 @@ def test_bo():
 def parse_arguments():
     parser = argparse.ArgumentParser(description='Run DTLZ optimization experiments')
     parser.add_argument('--problem', type=str, default='dtlz2',
-                       choices=['dtlz1', 'dtlz2', 'dtlz3', 'dtlz4', 'dtlz5', 'dtlz6', 'dtlz7', 'turbine'],
+                       choices=['dtlz1', 'dtlz2', 'dtlz3', 'dtlz4',
+                                'dtlz5', 'dtlz6', 'dtlz7', 'turbine', 'bicopter'],
                        help='DTLZ problem to optimize (default: dtlz2)')
     parser.add_argument('--n_runs', type=int, default=1,
                        help='Number of optimization runs (default: 1)')
@@ -48,6 +49,10 @@ def parse_arguments():
                         help='Number of controlling GP model type')
     parser.add_argument('--method_name', type=str, default='MOBO',
                         help='Number of controlling GP model type')
+    parser.add_argument('--m_tasks', type=int, default=8,
+                        help='Number of tasks')
+    parser.add_argument('--m_samples', type=int, default=20,
+                        help='Number of samples per task')
     return parser.parse_args()
 
 
@@ -362,7 +367,7 @@ def plot_contexts(contexts):
 
 
 def optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2,
-                           n_variables=5, temp_beta=1.0, model_type="ExactGP"):
+                           n_variables=5, temp_beta=1.0, model_type="ExactGP", m_tasks=8, m_samples=20):
     # Initialize the objective function
     obj_func = ContextualMultiObjectiveFunction(func_name=problem_name,
                                                 n_objectives=n_objectives,
@@ -374,7 +379,7 @@ def optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objective
         os.makedirs(directory_path)
 
     # Set up fixed contexts using LHS
-    n_contexts = 8
+    n_contexts = m_tasks
     contexts_file = 'data/context_{}_{}.pth'.format(n_contexts, obj_func.context_dim)
 
     if os.path.exists(contexts_file):
@@ -401,7 +406,7 @@ def optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objective
         )
 
         # Generate initial points
-        n_initial_points = 20
+        n_initial_points = m_samples
         X_init = torch.zeros(n_initial_points * n_contexts, obj_func.input_dim + obj_func.context_dim)
         for i in range(n_contexts):
             start_idx = i * n_initial_points
@@ -465,7 +470,7 @@ def optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objective
 
 
 def vae_optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2,
-                           n_variables=5, temp_beta=1.0, model_type="ExactGP"):
+                           n_variables=5, temp_beta=1.0, model_type="ExactGP", m_tasks=8, m_samples=20):
     # Initialize the objective function
     obj_func = ContextualMultiObjectiveFunction(func_name=problem_name,
                                                 n_objectives=n_objectives,
@@ -477,7 +482,7 @@ def vae_optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objec
         os.makedirs(directory_path)
 
     # Set up fixed contexts using LHS
-    n_contexts = 8
+    n_contexts = m_tasks
     contexts_file = 'data/context_{}_{}.pth'.format(n_contexts, obj_func.context_dim)
 
     if os.path.exists(contexts_file):
@@ -505,7 +510,7 @@ def vae_optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objec
         )
 
         # Generate initial points
-        n_initial_points = 20
+        n_initial_points = m_samples
         X_init = torch.zeros(n_initial_points * n_contexts, obj_func.input_dim + obj_func.context_dim)
         for i in range(n_contexts):
             start_idx = i * n_initial_points
@@ -540,7 +545,7 @@ def vae_optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objec
                 print(f"Run {run + 1}, Context {i}: No Pareto front found")
 
         # Save individual run data
-        save_path = f'result/{problem_name}/betaVAE-CMOBO-agg-nosigmoid_aug_2_0.1_optimization_history_{timestamp}_run_{run}.pth'
+        save_path = f'result/{problem_name}/betaVAE-CMOBO-nosigmoid_aug_2_0.1_optimization_history_{timestamp}_run_{run}.pth'
         torch.save(run_data, save_path)
         print(f"Run {run + 1} data saved to {save_path}")
 
@@ -564,12 +569,12 @@ def vae_optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objec
             ax.legend()
 
         plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-        plt.savefig(f'result/{problem_name}/betaVAE-CMOBO-agg-nosigmoid_aug_2_0.1_hypervolume_history_grid_{timestamp}_run_{run}.png')
+        plt.savefig(f'result/{problem_name}/betaVAE-CMOBO-nosigmoid_aug_2_0.1_hypervolume_history_grid_{timestamp}_run_{run}.png')
         plt.close()
 
 
 def diffuse_optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2,
-                           n_variables=5, temp_beta=1.0, model_type="ExactGP"):
+                           n_variables=5, temp_beta=1.0, model_type="ExactGP", m_tasks=8, m_samples=20):
     # Initialize the objective function
     obj_func = ContextualMultiObjectiveFunction(func_name=problem_name,
                                                 n_objectives=n_objectives,
@@ -581,7 +586,7 @@ def diffuse_optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_o
         os.makedirs(directory_path)
 
     # Set up fixed contexts using LHS
-    n_contexts = 8
+    n_contexts = m_tasks
     contexts_file = 'data/context_{}_{}.pth'.format(n_contexts, obj_func.context_dim)
 
     if os.path.exists(contexts_file):
@@ -609,7 +614,7 @@ def diffuse_optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_o
         )
 
         # Generate initial points
-        n_initial_points = 20
+        n_initial_points = m_samples
         X_init = torch.zeros(n_initial_points * n_contexts, obj_func.input_dim + obj_func.context_dim)
         for i in range(n_contexts):
             start_idx = i * n_initial_points
@@ -673,7 +678,7 @@ def diffuse_optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_o
 
 
 def run_mobo_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2,
-                  n_variables=5, temp_beta=1.0, model_type="ExactGP"):
+                  n_variables=5, temp_beta=1.0, model_type="ExactGP", m_tasks=8, m_samples=20):
     # Initialize the objective function
     obj_func = ContextualMultiObjectiveFunction(func_name=problem_name,
                                                 n_objectives=n_objectives,
@@ -685,7 +690,7 @@ def run_mobo_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2,
         os.makedirs(directory_path)
 
     # Set up fixed contexts using LHS
-    n_contexts = 8
+    n_contexts = m_tasks
     contexts_file = 'data/context_{}_{}.pth'.format(n_contexts, obj_func.context_dim)
 
     if os.path.exists(contexts_file):
@@ -723,7 +728,7 @@ def run_mobo_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2,
             )
 
             # Generate initial points for this context
-            n_initial_points = 20
+            n_initial_points = m_samples
             # X_init = torch.rand(n_initial_points, obj_func.input_dim)
             # sampler = qmc.LatinHypercube(d=obj_func.input_dim)
             # base_sampler = sampler.random(n=n_initial_points)
@@ -773,7 +778,7 @@ def run_mobo_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2,
 
 
 def run_parego_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2,
-                    n_variables=5, temp_beta=1.0, model_type="ExactGP", rho=0.001):
+                    n_variables=5, temp_beta=1.0, model_type="ExactGP", rho=0.001, m_tasks=8, m_samples=20):
     """
     Run ParEGO optimization tests on specified problem with multiple contexts
 
@@ -798,7 +803,7 @@ def run_parego_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2,
         os.makedirs(directory_path)
 
     # Set up fixed contexts using LHS
-    n_contexts = 8
+    n_contexts = m_tasks
     contexts_file = 'data/context_{}_{}.pth'.format(n_contexts, obj_func.context_dim)
 
     if os.path.exists(contexts_file):
@@ -842,7 +847,7 @@ def run_parego_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2,
 
 
             # Generate initial points for this context
-            n_initial_points = 20
+            n_initial_points = m_samples
             # Load pre-generated initial points if available
             X_init = torch.load("data/init_points_context_{}_{}_{}.pth".format(context_idx,
                                                                                obj_func.input_dim,
@@ -889,7 +894,7 @@ def run_parego_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2,
 
 
 def run_ehvi_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2,
-                  n_variables=5, temp_beta=1.0, model_type="ExactGP"):
+                  n_variables=5, temp_beta=1.0, model_type="ExactGP", m_tasks=8, m_samples=20):
     """
     Run EHVI optimization tests on specified problem with multiple contexts
 
@@ -956,7 +961,7 @@ def run_ehvi_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2,
             )
 
             # Generate initial points for this context
-            n_initial_points = 20
+            n_initial_points = m_samples
             # Load pre-generated initial points if available
             X_init = torch.load("data/init_points_context_{}_{}_{}.pth".format(context_idx,
                                                                                obj_func.input_dim,
@@ -1004,7 +1009,7 @@ def run_ehvi_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2,
 
 def run_pslmobo_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2,
                      n_variables=5, temp_beta=1.0, model_type="ExactGP",
-                     coef_lcb=0.01, n_candidate=50, n_pref_update=1):
+                     coef_lcb=0.01, n_candidate=50, n_pref_update=1, m_tasks=8, m_samples=20):
     """
     Run PSL-MOBO optimization tests on specified problem with multiple contexts
 
@@ -1031,7 +1036,7 @@ def run_pslmobo_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2,
         os.makedirs(directory_path)
 
     # Set up fixed contexts using LHS
-    n_contexts = 8
+    n_contexts = m_tasks
     contexts_file = 'data/context_{}_{}.pth'.format(n_contexts, obj_func.context_dim)
 
     if os.path.exists(contexts_file):
@@ -1077,7 +1082,7 @@ def run_pslmobo_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2,
             )
 
             # Generate initial points for this context
-            n_initial_points = 20
+            n_initial_points = m_samples
             # Load pre-generated initial points if available
             X_init = torch.load("data/init_points_context_{}_{}_{}.pth".format(context_idx,
                                                                                obj_func.input_dim,
@@ -1137,6 +1142,7 @@ def run_pslmobo_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2,
 #         n_pref_update=5
 #     )
 
+context_scale = 2
 
 def main():
     args = parse_arguments()
@@ -1148,6 +1154,8 @@ def main():
     print(f"- Number of objectives: {args.n_objectives}")
     print(f"- Number of variables: {args.n_variables}")
     print(f"- Number of control beta: {args.beta}")
+    print(f"- Number of tasks: {args.m_tasks}")
+    print(f"- Number of samples: {args.m_samples}")
     print(f"- Model Type: {args.model_type}")
     print(f"- Method Name: {args.method_name}")
 
@@ -1161,6 +1169,8 @@ def main():
             n_variables=args.n_variables,
             temp_beta=args.beta,
             model_type=args.model_type,
+            m_tasks=args.m_tasks,
+            m_samples=args.m_samples,
         )
 
     if args.method_name == "PAREGO":
@@ -1171,6 +1181,8 @@ def main():
            n_objectives=args.n_objectives,
            n_variables=args.n_variables,
            rho=0.001,
+           m_tasks=args.m_tasks,
+           m_samples=args.m_samples,
         )
 
     if args.method_name == "PSLMOBO":
@@ -1180,6 +1192,8 @@ def main():
            n_iter=args.n_iter,
            n_objectives=args.n_objectives,
            n_variables=args.n_variables,
+           m_tasks=args.m_tasks,
+           m_samples=args.m_samples,
         )
 
     if args.method_name == "EHVI":
@@ -1189,6 +1203,8 @@ def main():
             n_iter=args.n_iter,
             n_objectives=args.n_objectives,
             n_variables=args.n_variables,
+            m_tasks=args.m_tasks,
+            m_samples=args.m_samples,
         )
 
     if args.method_name == "VAE-CMOBO":
@@ -1201,6 +1217,8 @@ def main():
             n_variables=args.n_variables,
             temp_beta=args.beta,
             model_type=args.model_type,
+            m_tasks=args.m_tasks,
+            m_samples=args.m_samples,
         )
 
     if args.method_name == "DDIM-CMOBO":
@@ -1213,6 +1231,8 @@ def main():
             n_variables=args.n_variables,
             temp_beta=args.beta,
             model_type=args.model_type,
+            m_tasks=args.m_tasks,
+            m_samples=args.m_samples,
         )
 
     if args.method_name == "MOBO":
@@ -1224,6 +1244,8 @@ def main():
             n_variables=args.n_variables,
             temp_beta=args.beta,
             model_type=args.model_type,
+            m_tasks=args.m_tasks,
+            m_samples=args.m_samples,
         )
 
     if args.method_name == "ALL":
@@ -1235,6 +1257,8 @@ def main():
             n_variables=args.n_variables,
             temp_beta=args.beta,
             model_type=args.model_type,
+            m_tasks=args.m_tasks,
+            m_samples=args.m_samples,
         )
 
         run_parego_test(
@@ -1244,6 +1268,8 @@ def main():
             n_objectives=args.n_objectives,
             n_variables=args.n_variables,
             rho=0.001,
+            m_tasks=args.m_tasks,
+            m_samples=args.m_samples,
         )
 
         run_pslmobo_test(
@@ -1252,6 +1278,8 @@ def main():
             n_iter=args.n_iter,
             n_objectives=args.n_objectives,
             n_variables=args.n_variables,
+            m_tasks=args.m_tasks,
+            m_samples=args.m_samples,
         )
 
         run_ehvi_test(
@@ -1260,6 +1288,8 @@ def main():
             n_iter=args.n_iter,
             n_objectives=args.n_objectives,
             n_variables=args.n_variables,
+            m_tasks=args.m_tasks,
+            m_samples=args.m_samples,
         )
 
         run_mobo_test(
@@ -1270,6 +1300,8 @@ def main():
             n_variables=args.n_variables,
             temp_beta=args.beta,
             model_type=args.model_type,
+            m_tasks=args.m_tasks,
+            m_samples=args.m_samples,
         )
 
         optimization_loop_test(
@@ -1280,6 +1312,8 @@ def main():
             n_variables=args.n_variables,
             temp_beta=args.beta,
             model_type=args.model_type,
+            m_tasks=args.m_tasks,
+            m_samples=args.m_samples,
         )
 
 

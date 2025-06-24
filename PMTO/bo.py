@@ -2604,8 +2604,8 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
                                        mutual_info, self.epoch)
 
         # Instantiate callback
-        # tensorboard_callback = TensorBoardCallback(writer, prefix="VAE_training")
-        tensorboard_callback = TensorBoardCallback(writer, prefix="VAE_aggresive_training")
+        tensorboard_callback = TensorBoardCallback(writer, prefix="VAE_training")
+        # tensorboard_callback = TensorBoardCallback(writer, prefix="VAE_aggresive_training")
 
         if len(X_train) < self.vae_min_data_points:
             print(f"Not enough data points for VAE training ({len(X_train)} < {self.vae_min_data_points})")
@@ -2624,7 +2624,7 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
                 batch_size=min(self.vae_batch_size, len(X_train)),
                 trainer_id=f"CMOBO_VAE_{iteration}",
                 # NEW: Enable aggressive training
-                aggressive_training=True,
+                aggressive_training=False,
                 max_aggressive_epochs=min(5, self.vae_epochs // 2)  # Use aggressive training for first half
             )
             full_training = True  # Always do full training for new model
@@ -2746,17 +2746,17 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
             # Full training
             # self.vae_model.train(X=X_train, contexts=contexts_train)
             print(f"VAE fully trained at iteration {iteration} with {len(X_train)} points")
-            # train_with_callback(self.vae_model, X_train, contexts_train, tensorboard_callback)
+            train_with_callback(self.vae_model, X_train, contexts_train, tensorboard_callback)
             # print(f"VAE fully trained at iteration {iteration} with {len(X_train)} points")
-            train_with_aggressive_callback(self.vae_model, X_train, contexts_train, tensorboard_callback)
+            # train_with_aggressive_callback(self.vae_model, X_train, contexts_train, tensorboard_callback)
 
         else:
             # Incremental training
             original_epochs = self.vae_model.epochs
             self.vae_model.epochs = max(30, int(original_epochs * 0.3))  # Use fewer epochs for incremental updates
             # self.vae_model.train(X=X_train, contexts=contexts_train)
-            # train_with_callback(self.vae_model, X_train, contexts_train, tensorboard_callback)
-            train_with_aggressive_callback(self.vae_model, X_train, contexts_train, tensorboard_callback)
+            train_with_callback(self.vae_model, X_train, contexts_train, tensorboard_callback)
+            # train_with_aggressive_callback(self.vae_model, X_train, contexts_train, tensorboard_callback)
             self.vae_model.epochs = original_epochs  # Restore original setting
             print(f"VAE incrementally updated at iteration {iteration} with {len(X_train)} points")
 

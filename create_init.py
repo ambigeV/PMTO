@@ -53,24 +53,48 @@ def load_initial_points(context_idx, save_dir='data', input_dim=5, input_points=
     return torch.load(load_path)
 
 
+def generate_and_save_contexts(n_contexts, context_dim, save_dir='data'):
+    # Create directory if it doesn't exist
+    os.makedirs(save_dir, exist_ok=True)
+
+    # Set base random seed
+    base_seed = 42
+
+    # Use LHS to generate contexts
+    sampler = qmc.LatinHypercube(d=context_dim)
+    contexts = sampler.random(n=n_contexts)
+
+    # Convert to torch tensor
+    contexts_tensor = torch.tensor(contexts, dtype=torch.float32)
+    new_tensor = torch.rand([n_contexts, 1])
+    contexts_tensor = torch.cat([new_tensor, contexts_tensor], dim=1)
+    print(contexts_tensor)
+
+    save_path = os.path.join(save_dir, f'context_{n_contexts}_{context_dim + 1}.pth')
+    torch.save(contexts_tensor, save_path)
+
+    return contexts_tensor
+
+
 # Example usage
 if __name__ == "__main__":
+    generate_and_save_contexts(n_contexts=16, context_dim=2)
     # Configuration
-    N_CONTEXTS = 8  # Number of contexts
-    INPUT_DIM = 5  # 3D input space
-    N_POINTS = 20  # 20 points per context
-
-    # Generate and save points
-    generate_and_save_initial_points(
-        n_contexts=N_CONTEXTS,
-        input_dim=INPUT_DIM,
-        n_points=N_POINTS
-    )
-
-    # Load and verify points for each context
-    for i in range(N_CONTEXTS):
-        points = load_initial_points(context_idx=i, input_dim=INPUT_DIM, input_points=N_POINTS)
-        print(f"\nLoaded points for context {i}:")
-        print("Shape:", points.shape)
-        print("First 3 points:")
-        print(points[:3])
+    # N_CONTEXTS = 16  # Number of contexts
+    # INPUT_DIM = 12  # 3D input space
+    # N_POINTS = 40  # 20 points per context
+    #
+    # # Generate and save points
+    # generate_and_save_initial_points(
+    #     n_contexts=N_CONTEXTS,
+    #     input_dim=INPUT_DIM,
+    #     n_points=N_POINTS
+    # )
+    #
+    # # Load and verify points for each context
+    # for i in range(N_CONTEXTS):
+    #     points = load_initial_points(context_idx=i, input_dim=INPUT_DIM, input_points=N_POINTS)
+    #     print(f"\nLoaded points for context {i}:")
+    #     print("Shape:", points.shape)
+    #     print("First 3 points:")
+    #     print(points[:3])

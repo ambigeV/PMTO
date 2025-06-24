@@ -242,6 +242,10 @@ class ContextualMultiObjectiveFunction:
             self.n_objectives = 2  # Turbine DW: mass proxy + negative power (both minimized)
             self.n_variables = 3  # Turbine DW: radius, height, pitch (design variables)
             self.context_dim = 2  # Turbine DW: wind speed + dummy variable for DTLZ framework consistency
+        elif self.func_name == 'bicopter':
+            self.n_objectives = 2  # Bicopter DW: distance to goal + energy consumption (both minimized)
+            self.n_variables = 12  # Bicopter DW: 6 time steps × 2 actuators = 12 control variables
+            self.context_dim = 3  # Bicopter DW: dummy + length + density (3 context dims total)
         else:
             # Original DTLZ configuration
             default_k = {
@@ -272,6 +276,10 @@ class ContextualMultiObjectiveFunction:
             # Turbine DW: This should be verified by evaluating across all wind speeds and design space
             # Turbine DW: True nadir = max(f1) across all contexts, max(f2) across all contexts
             self.nadir_point = torch.tensor([1.0, 1.0])  # Turbine DW: TENTATIVE - requires validation
+        elif self.func_name == 'bicopter':
+            # Bicopter DW: Nadir point left undefined as requested
+            # Bicopter DW: Will need empirical determination later
+            self.nadir_point = torch.tensor([1.0, 1.0])  # Bicopter DW: To be determined empirically
         else:
             # Configuring the nadir point via an ad-hoc way?
             self.nadir_point = {
@@ -284,6 +292,38 @@ class ContextualMultiObjectiveFunction:
         """Scale decision variables"""
         min_bound, max_bound = self.bounds
         return min_bound + (max_bound - min_bound) * x
+
+    # bicopter: Added bicopter-specific scaling functions
+    def scale_bicopter_variables(self, x):
+        """
+        Scale bicopter control variables from [0,1] to thrust commands
+
+        Bicopter DW: Control variable ranges explained:
+        Bicopter DW: - 12 variables = 6 time steps × 2 actuators (reduced from 32 to 12)
+        Bicopter DW: - Each control input scaled from [0,1] to [-5,5] thrust units
+        Bicopter DW: - Negative values allow reverse thrust for more complex maneuvers
+        """
+        # Bicopter DW: Scale control inputs from [0,1] to [-5,5] thrust units
+        scaled = -5 + x * 10  # Bicopter DW: Map [0,1] to [-5,5]
+        return scaled
+
+    def scale_bicopter_context(self, c):
+        """
+        Scale context from [0,1] to physical bicopter parameters
+
+        Bicopter DW: Context scaling explained:
+        Bicopter DW: - c[:, 0] (first dimension) is DUMMY/UNUSED for framework consistency
+        Bicopter DW: - c[:, 1] (second dimension) controls LENGTH independently
+        Bicopter DW: - c[:, 2] (third dimension) controls DENSITY independently
+        Bicopter DW: - Length range [0.5, 2.0] meters
+        Bicopter DW: - Density range [0.5, 2.0] kg/m
+        Bicopter DW: - This allows full 2D exploration of length-density space with dummy consistency
+        """
+        # Bicopter DW: Independent scaling of length and density (ignore dummy c[:, 0])
+        length = 1.0 + c[:, 1] * 0.5  # Bicopter DW: Length from [0.5, 2.0] m using c[:, 1]
+        density = 1.0 + c[:, 2] * 0.5  # Bicopter DW: Density from [0.5, 2.0] kg/m using c[:, 2]
+
+        return length, density
 
     # turbine: Added turbine-specific scaling functions
     def scale_turbine_variables(self, x):
@@ -451,6 +491,110 @@ class ContextualMultiObjectiveFunction:
 
         return torch.stack([f1, f2], dim=1)
 
+    # bicopter: Added bicopter dynamics simulation
+    def _bicopter_dynamics(self, u, length, density):
+        """
+        Simulate bicopter dynamics and return normalized objectives
+
+        Bicopter DW: Physics simulation with proper normalization
+        Bicopter DW: u: [batch_size, 12] scaled control inputs in [-5,5]
+        Bicopter DW: length: [batch_size] length values in [0.5, 2.0] m
+        Bicopter DW: density: [batch_size] density values in [0.5, 2.0] kg/m
+
+        Returns:
+            f1_norm: Distance to goal objective in [0,1] (0=perfect, 1=worst)
+            f2_norm: Energy objective in [0,1] (0=minimal energy, 1=maximum energy)
+        """
+        batch_size = u.shape[0]
+        n_steps = 6  # Bicopter DW: 6 time steps (reduced from 16)
+        g = -9.81  # Bicopter DW: Gravity acceleration
+        dt = 0.25  # Bicopter DW: Time step
+
+        # Bicopter DW: Physical parameters from context
+        mass = length * density  # Bicopter DW: Mass = length × density
+        inertia = (1 / 12) * mass * (2 * length) ** 2  # Bicopter DW: Rotational inertia
+
+        # Bicopter DW: Initial and goal states
+        q_init = torch.zeros(batch_size, 6)  # Bicopter DW: [x, y, θ, vx, vy, vθ]
+        goal_state = torch.zeros(batch_size, 6)
+        goal_state[:, 0] = 1.0  # Bicopter DW: Target x-position = 1.0
+
+        # Bicopter DW: Initialize state and objectives
+        current_state = q_init.clone()
+        total_energy = torch.zeros(batch_size)
+
+        # Bicopter DW: Reshape control inputs: [batch_size, 12] -> [batch_size, 6, 2]
+        u_reshaped = u.view(batch_size, n_steps, 2)
+
+        # Bicopter DW: Simulate dynamics over time steps
+        for step in range(n_steps):
+            # Bicopter DW: Extract current state
+            x, y, theta = current_state[:, 0], current_state[:, 1], current_state[:, 2]
+            vx, vy, vtheta = current_state[:, 3], current_state[:, 4], current_state[:, 5]
+
+            # Bicopter DW: Control inputs for this time step
+            u1, u2 = u_reshaped[:, step, 0], u_reshaped[:, step, 1]
+
+            # Bicopter DW: Energy calculation (quadratic in control effort)
+            step_energy = 0.5 * (u1 ** 2 + u2 ** 2) * dt
+            total_energy += step_energy
+
+            # Bicopter DW: Forces and torques
+            total_thrust = u1 + u2
+            differential_thrust = u1 - u2
+
+            # Bicopter DW: Accelerations in body frame
+            ax = -total_thrust * torch.sin(theta) / mass
+            ay = total_thrust * torch.cos(theta) / mass + g
+            alpha = length * differential_thrust / inertia
+
+            # Bicopter DW: Update velocities
+            vx_new = vx + ax * dt
+            vy_new = vy + ay * dt
+            vtheta_new = vtheta + alpha * dt
+
+            # Bicopter DW: Update positions
+            x_new = x + vx_new * dt
+            y_new = y + vy_new * dt
+            theta_new = theta + vtheta_new * dt
+
+            # Bicopter DW: Update state vector
+            current_state = torch.stack([x_new, y_new, theta_new, vx_new, vy_new, vtheta_new], dim=1)
+
+        # Bicopter DW: Calculate final distance to goal
+        distance_error = torch.norm(current_state - goal_state, dim=1)
+
+        # Bicopter DW: Normalize objectives to [0,1] based on reasonable bounds
+        # Bicopter DW: These bounds are estimated based on physics and typical performance
+        max_distance = 5.0  # Bicopter DW: Maximum reasonable distance error
+        max_energy = 100.0  # Bicopter DW: Maximum reasonable energy consumption
+
+        # f1_norm = torch.clamp(distance_error / max_distance, 0, 1)
+        # f2_norm = torch.clamp(total_energy / max_energy, 0, 1)
+        f1_norm = distance_error / max_distance / 7.0
+        f2_norm = total_energy / max_energy * 4.0
+
+        return f1_norm, f2_norm
+
+    # bicopter: Added complete bicopter evaluation function
+    def _contextual_bicopter(self, x, c):
+        """
+        Bicopter evaluation with distance and energy objectives
+
+        Bicopter DW: x: [batch_size, 12] - scaled control inputs
+        Bicopter DW: c: [batch_size, 2] - context variables encoding length and density
+        """
+        # Bicopter DW: Scale control inputs to physical units
+        u_scaled = self.scale_bicopter_variables(x)
+
+        # Bicopter DW: Extract physical parameters from context
+        length, density = self.scale_bicopter_context(c)
+
+        # Bicopter DW: Simulate bicopter dynamics
+        f1, f2 = self._bicopter_dynamics(u_scaled, length, density)
+
+        return torch.stack([f1, f2], dim=1)
+
     def evaluate(self, inputs: torch.Tensor) -> torch.Tensor:
         """
         Evaluate the contextual multi-objective function.
@@ -468,6 +612,11 @@ class ContextualMultiObjectiveFunction:
             x_scaled = self.scale_turbine_variables(x)
             wind_speed = self.scale_turbine_context(c)  # Returns 1D wind speed tensor
             return self._contextual_turbine(x_scaled, wind_speed)
+
+        # bicopter: Added bicopter evaluation branch
+        elif self.func_name == 'bicopter':
+            return self._contextual_bicopter(x, c)
+
         else:
             # Original DTLZ evaluation
             x_scaled = self.scale_x(x)
@@ -745,12 +894,292 @@ def visualize_turbine_landscape():
     return fig, axes, X_turbine, Y_turbine
 
 
-# Example usage
-if __name__ == "__main__":
-    # Turbine DW: Run the turbine landscape visualization
-    fig, axes, inputs, outputs = visualize_turbine_landscape()
+# # Example usage
+# if __name__ == "__main__":
+#     # Turbine DW: Run the turbine landscape visualization
+#     fig, axes, inputs, outputs = visualize_turbine_landscape()
+#
+#     print(f"\nVisualization complete!")
+#     print(f"Generated {inputs.shape[0]} solutions for analysis")
+#     print(f"Turbine problem has {inputs.shape[1] - 2} design variables and 2 context dimensions")
+#     print(f"Outputs: {outputs.shape[1]} objectives (mass, power)")
 
-    print(f"\nVisualization complete!")
-    print(f"Generated {inputs.shape[0]} solutions for analysis")
-    print(f"Turbine problem has {inputs.shape[1] - 2} design variables and 2 context dimensions")
-    print(f"Outputs: {outputs.shape[1]} objectives (mass, power)")
+import torch
+import numpy as np
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+
+
+def visualize_bicopter_landscape():
+    """
+    Visualize the landscape of bicopter multi-objective function
+    Step 1: Initialize solutions in a large pool
+    Step 2: Evaluate the solutions
+    Step 3: Visualize the solutions and analyze context sensitivity
+    """
+
+    # Set up the figure
+    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    fig.suptitle('Bicopter Multi-Objective Optimization Landscape', fontsize=16)
+
+    # Test parameters
+    n_samples = 10000  # Bicopter DW: Large pool of solutions for comprehensive visualization
+
+    print("Visualizing Bicopter Problem Landscape...")
+
+    # =====================================================
+    # Step 1: Initialize bicopter problem
+    # =====================================================
+    bicopter_problem = ContextualMultiObjectiveFunction(func_name='bicopter')
+
+    # =====================================================
+    # Step 2: Generate and evaluate solutions
+    # =====================================================
+
+    # Bicopter DW: Input format [12 control vars, dummy_context, length, density]
+    # All values in [0,1] will be scaled appropriately by the class
+    X_bicopter = torch.rand(n_samples, bicopter_problem.n_variables + bicopter_problem.context_dim)
+
+    # Step 3: Evaluate bicopter solutions
+    Y_bicopter = bicopter_problem.evaluate(X_bicopter)
+
+    print(f"Bicopter Problem Analysis:")
+    print(f"Input shape: {X_bicopter.shape}")
+    print(f"Output shape: {Y_bicopter.shape}")
+    print(f"Distance objective range: [{Y_bicopter[:, 0].min():.3f}, {Y_bicopter[:, 0].max():.3f}]")
+    print(f"Energy objective range: [{Y_bicopter[:, 1].min():.3f}, {Y_bicopter[:, 1].max():.3f}]")
+
+    # Extract control variables and context for analysis
+    control_mean = X_bicopter[:, :12].mean(dim=1).numpy()  # Bicopter DW: Average control intensity
+    control_std = X_bicopter[:, :12].std(dim=1).numpy()  # Bicopter DW: Control variation
+    length_norm = X_bicopter[:, 13].numpy()  # Bicopter DW: Normalized length [0,1] (skip dummy at index 12)
+    density_norm = X_bicopter[:, 14].numpy()  # Bicopter DW: Normalized density [0,1]
+
+    distance_obj = Y_bicopter[:, 0].numpy()  # Bicopter DW: Distance to goal objective (minimize)
+    energy_obj = Y_bicopter[:, 1].numpy()  # Bicopter DW: Energy consumption objective (minimize)
+
+    # =====================================================
+    # Plot 1: Main Objective Space (Distance vs Energy)
+    # =====================================================
+    # Bicopter DW: Color by length to show context dependency
+    scatter1 = axes[0, 0].scatter(distance_obj, energy_obj, c=length_norm,
+                                  cmap='viridis', alpha=0.7, s=30)
+    axes[0, 0].set_title('Objective Space: Distance vs Energy\n(colored by length)', fontsize=12)
+    axes[0, 0].set_xlabel('Distance to Goal (f1) - Minimize')
+    axes[0, 0].set_ylabel('Energy Consumption (f2) - Minimize')
+    cbar1 = plt.colorbar(scatter1, ax=axes[0, 0])
+    cbar1.set_label('Length (normalized [0,1])')
+    axes[0, 0].grid(True, alpha=0.3)
+
+    # =====================================================
+    # Plot 2: Context Space - Length vs Density
+    # =====================================================
+    scatter2 = axes[0, 1].scatter(length_norm, density_norm, c=distance_obj,
+                                  cmap='plasma', alpha=0.7, s=30)
+    axes[0, 1].set_title('Context Space: Length vs Density\n(colored by distance objective)', fontsize=12)
+    axes[0, 1].set_xlabel('Length (normalized [0,1])')
+    axes[0, 1].set_ylabel('Density (normalized [0,1])')
+    cbar2 = plt.colorbar(scatter2, ax=axes[0, 1])
+    cbar2.set_label('Distance Objective')
+    axes[0, 1].grid(True, alpha=0.3)
+
+    # =====================================================
+    # Plot 3: Length Context Sensitivity
+    # =====================================================
+    scatter3 = axes[0, 2].scatter(length_norm, distance_obj, c=energy_obj,
+                                  cmap='coolwarm', alpha=0.7, s=30)
+    axes[0, 2].set_title('Length Sensitivity: Length vs Distance\n(colored by energy)', fontsize=12)
+    axes[0, 2].set_xlabel('Length (normalized [0,1])')
+    axes[0, 2].set_ylabel('Distance Objective (f1)')
+    cbar3 = plt.colorbar(scatter3, ax=axes[0, 2])
+    cbar3.set_label('Energy Objective')
+    axes[0, 2].grid(True, alpha=0.3)
+
+    # =====================================================
+    # Plot 4: Density Context Sensitivity
+    # =====================================================
+    scatter4 = axes[1, 0].scatter(density_norm, energy_obj, c=distance_obj,
+                                  cmap='RdYlBu', alpha=0.7, s=30)
+    axes[1, 0].set_title('Density Sensitivity: Density vs Energy\n(colored by distance)', fontsize=12)
+    axes[1, 0].set_xlabel('Density (normalized [0,1])')
+    axes[1, 0].set_ylabel('Energy Objective (f2)')
+    cbar4 = plt.colorbar(scatter4, ax=axes[1, 0])
+    cbar4.set_label('Distance Objective')
+    axes[1, 0].grid(True, alpha=0.3)
+
+    # =====================================================
+    # Plot 5: Control Strategy Analysis
+    # =====================================================
+    # Bicopter DW: Show relationship between control characteristics and performance
+    scatter5 = axes[1, 1].scatter(control_mean, control_std, c=energy_obj,
+                                  cmap='spring', alpha=0.7, s=30)
+    axes[1, 1].set_title('Control Strategy: Mean vs Variation\n(colored by energy)', fontsize=12)
+    axes[1, 1].set_xlabel('Average Control Intensity')
+    axes[1, 1].set_ylabel('Control Variation (Std Dev)')
+    cbar5 = plt.colorbar(scatter5, ax=axes[1, 1])
+    cbar5.set_label('Energy Objective')
+    axes[1, 1].grid(True, alpha=0.3)
+
+    # =====================================================
+    # Plot 6: Pareto Front Analysis by Context
+    # =====================================================
+    # Bicopter DW: Identify approximate Pareto fronts for different length categories
+
+    # Separate solutions by length bins
+    length_bins = np.linspace(0, 1, 4)  # 3 length ranges
+    colors = ['red', 'blue', 'green']
+
+    for i in range(len(length_bins) - 1):
+        mask = (length_norm >= length_bins[i]) & (length_norm < length_bins[i + 1])
+        if np.sum(mask) > 0:
+            axes[1, 2].scatter(distance_obj[mask], energy_obj[mask],
+                               c=colors[i], alpha=0.6, s=20,
+                               label=f'Length {length_bins[i]:.1f}-{length_bins[i + 1]:.1f}')
+
+    axes[1, 2].set_title('Pareto Front by Length Ranges', fontsize=12)
+    axes[1, 2].set_xlabel('Distance Objective (f1)')
+    axes[1, 2].set_ylabel('Energy Objective (f2)')
+    axes[1, 2].legend()
+    axes[1, 2].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.show()
+
+    # =====================================================
+    # Create Additional 3D Visualization
+    # =====================================================
+    fig_3d = plt.figure(figsize=(15, 5))
+
+    # 3D Plot 1: Context-Objective Relationship
+    ax1 = fig_3d.add_subplot(131, projection='3d')
+    scatter_3d1 = ax1.scatter(length_norm, density_norm, distance_obj,
+                              c=energy_obj, cmap='viridis', alpha=0.7)
+    ax1.set_xlabel('Length (normalized)')
+    ax1.set_ylabel('Density (normalized)')
+    ax1.set_zlabel('Distance Objective')
+    ax1.set_title('3D: Context vs Distance\n(colored by energy)')
+    fig_3d.colorbar(scatter_3d1, ax=ax1, shrink=0.5)
+
+    # 3D Plot 2: Mass vs Context Relationship
+    # Calculate mass from length and density for visualization
+    length_phys = 0.5 + length_norm * 1.5  # Convert to [0.5, 2.0] m
+    density_phys = 0.5 + density_norm * 1.5  # Convert to [0.5, 2.0] kg/m
+    mass_calc = length_phys * density_phys
+
+    ax2 = fig_3d.add_subplot(132, projection='3d')
+    scatter_3d2 = ax2.scatter(length_norm, density_norm, mass_calc,
+                              c=distance_obj, cmap='plasma', alpha=0.7)
+    ax2.set_xlabel('Length (normalized)')
+    ax2.set_ylabel('Density (normalized)')
+    ax2.set_zlabel('Calculated Mass (kg)')
+    ax2.set_title('3D: Context vs Mass\n(colored by distance)')
+    fig_3d.colorbar(scatter_3d2, ax=ax2, shrink=0.5)
+
+    # 3D Plot 3: Control-Objective Relationship
+    ax3 = fig_3d.add_subplot(133, projection='3d')
+    scatter_3d3 = ax3.scatter(control_mean, control_std, energy_obj,
+                              c=distance_obj, cmap='coolwarm', alpha=0.7)
+    ax3.set_xlabel('Control Mean')
+    ax3.set_ylabel('Control Std')
+    ax3.set_zlabel('Energy Objective')
+    ax3.set_title('3D: Control vs Energy\n(colored by distance)')
+    fig_3d.colorbar(scatter_3d3, ax=ax3, shrink=0.5)
+
+    plt.tight_layout()
+    plt.show()
+
+    # =====================================================
+    # Print Summary Statistics
+    # =====================================================
+    print("\n" + "=" * 50)
+    print("BICOPTER LANDSCAPE SUMMARY STATISTICS")
+    print("=" * 50)
+
+    # Convert normalized values to physical units for interpretation
+    length_physical = 0.5 + length_norm * 1.5  # [0.5, 2.0] m
+    density_physical = 0.5 + density_norm * 1.5  # [0.5, 2.0] kg/m
+    mass_physical = length_physical * density_physical  # Calculated mass
+
+    print(f"Context Variable Ranges (Physical Units):")
+    print(f"  Length: {length_physical.min():.2f} - {length_physical.max():.2f} m")
+    print(f"  Density: {density_physical.min():.2f} - {density_physical.max():.2f} kg/m")
+    print(f"  Calculated Mass: {mass_physical.min():.2f} - {mass_physical.max():.2f} kg")
+
+    print(f"\nControl Statistics:")
+    print(f"  Control Mean: {control_mean.min():.3f} - {control_mean.max():.3f}")
+    print(f"  Control Std: {control_std.min():.3f} - {control_std.max():.3f}")
+
+    print(f"\nObjective Statistics:")
+    print(f"  Distance Objective (f1): {distance_obj.min():.3f} - {distance_obj.max():.3f}")
+    print(f"  Energy Objective (f2): {energy_obj.min():.3f} - {energy_obj.max():.3f}")
+
+    # Find best and worst solutions
+    best_distance_idx = np.argmin(distance_obj)
+    best_energy_idx = np.argmin(energy_obj)
+
+    print(f"\nBest Distance Solution:")
+    print(f"  Distance: {distance_obj[best_distance_idx]:.3f}, Energy: {energy_obj[best_distance_idx]:.3f}")
+    print(
+        f"  Length: {length_physical[best_distance_idx]:.2f}m, Density: {density_physical[best_distance_idx]:.2f}kg/m")
+    print(f"  Mass: {mass_physical[best_distance_idx]:.2f}kg, Control Mean: {control_mean[best_distance_idx]:.3f}")
+
+    print(f"\nBest Energy Solution:")
+    print(f"  Distance: {distance_obj[best_energy_idx]:.3f}, Energy: {energy_obj[best_energy_idx]:.3f}")
+    print(f"  Length: {length_physical[best_energy_idx]:.2f}m, Density: {density_physical[best_energy_idx]:.2f}kg/m")
+    print(f"  Mass: {mass_physical[best_energy_idx]:.2f}kg, Control Mean: {control_mean[best_energy_idx]:.3f}")
+
+    # =====================================================
+    # Context Sensitivity Analysis
+    # =====================================================
+    print("\n" + "=" * 50)
+    print("CONTEXT SENSITIVITY ANALYSIS")
+    print("=" * 50)
+
+    # Analyze correlation between context and objectives
+    from scipy.stats import pearsonr
+
+    length_distance_corr, _ = pearsonr(length_norm, distance_obj)
+    length_energy_corr, _ = pearsonr(length_norm, energy_obj)
+    density_distance_corr, _ = pearsonr(density_norm, distance_obj)
+    density_energy_corr, _ = pearsonr(density_norm, energy_obj)
+    mass_distance_corr, _ = pearsonr(mass_physical, distance_obj)
+    mass_energy_corr, _ = pearsonr(mass_physical, energy_obj)
+
+    print(f"Correlation Analysis:")
+    print(f"  Length vs Distance: {length_distance_corr:.3f}")
+    print(f"  Length vs Energy: {length_energy_corr:.3f}")
+    print(f"  Density vs Distance: {density_distance_corr:.3f}")
+    print(f"  Density vs Energy: {density_energy_corr:.3f}")
+    print(f"  Mass vs Distance: {mass_distance_corr:.3f}")
+    print(f"  Mass vs Energy: {mass_energy_corr:.3f}")
+
+    # Identify context regions for best performance
+    # Low distance (good tracking)
+    low_distance_mask = distance_obj < np.percentile(distance_obj, 25)
+    print(f"\nBest Distance Performance Regions:")
+    print(
+        f"  Preferred Length: {length_norm[low_distance_mask].mean():.3f} ± {length_norm[low_distance_mask].std():.3f}")
+    print(
+        f"  Preferred Density: {density_norm[low_distance_mask].mean():.3f} ± {density_norm[low_distance_mask].std():.3f}")
+
+    # Low energy (efficient)
+    low_energy_mask = energy_obj < np.percentile(energy_obj, 25)
+    print(f"\nBest Energy Performance Regions:")
+    print(f"  Preferred Length: {length_norm[low_energy_mask].mean():.3f} ± {length_norm[low_energy_mask].std():.3f}")
+    print(
+        f"  Preferred Density: {density_norm[low_energy_mask].mean():.3f} ± {density_norm[low_energy_mask].std():.3f}")
+
+    return fig, axes, fig_3d, X_bicopter, Y_bicopter
+
+
+# Bicopter DW: Example usage and testing
+if __name__ == "__main__":
+    print("Starting Bicopter Landscape Visualization...")
+    try:
+        # Note: Make sure ContextualMultiObjectiveFunction with bicopter is imported
+        fig_main, axes_main, fig_3d, X_data, Y_data = visualize_bicopter_landscape()
+        print("\nVisualization completed successfully!")
+        print(f"Generated data shapes: X={X_data.shape}, Y={Y_data.shape}")
+    except Exception as e:
+        print(f"Error during visualization: {e}")
+        print("Make sure the ContextualMultiObjectiveFunction class with bicopter support is available.")
