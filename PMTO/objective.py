@@ -1,4 +1,5 @@
 import torch
+import magpylib as magpy
 import numpy as np
 
 
@@ -237,8 +238,19 @@ class ContextualMultiObjectiveFunction:
         self.func_name = func_name.lower()
         self.n_objectives = n_objectives
 
+
         # turbine: Problem-specific configuration
-        if self.func_name == 'turbine':
+        # Magnetic sifter configuration
+        if self.func_name == 'magnetic_sifter':
+            self.n_objectives = 3  # Sifter: f1 (unwanted capture), f2 (separation), f3 (thickness)
+            self.n_variables = 3  # Sifter: gap, mag_len, thickness (design variables)
+            self.context_dim = 3  # Sifter: dummy + ms1 + ms2 (1 dummy + 2 magnetic moments)
+
+            # Sifter: Fixed physical parameters from original code
+            self.grid_res = 0.0005
+            self.Q = 15  # mL/hr flow rate
+            self.cell_r = 0.0075  # Cell radius in mm
+        elif self.func_name == 'turbine':
             self.n_objectives = 2  # Turbine DW: mass proxy + negative power (both minimized)
             self.n_variables = 3  # Turbine DW: radius, height, pitch (design variables)
             self.context_dim = 2  # Turbine DW: wind speed + dummy variable for DTLZ framework consistency
@@ -270,7 +282,10 @@ class ContextualMultiObjectiveFunction:
         self.output_dim = self.n_objectives
 
         # turbine: Problem-specific nadir points
-        if self.func_name == 'turbine':
+        # Sifter: Nadir point - will be set empirically later as requested
+        if self.func_name == 'magnetic_sifter':
+            self.nadir_point = torch.tensor([1.0, 1.0, 1.0])  # Placeholder - to be determined empirically
+        elif self.func_name == 'turbine':
             # Turbine DW: Nadir point determination - NEEDS EMPIRICAL VERIFICATION
             # Turbine DW: WARNING: (1.0, 1.0) assumes worst case occurs at normalization bounds
             # Turbine DW: This should be verified by evaluating across all wind speeds and design space
@@ -595,6 +610,201 @@ class ContextualMultiObjectiveFunction:
 
         return torch.stack([f1, f2], dim=1)
 
+    # sifter: Scale Variables
+    def scale_sifter_variables(self, x):
+        """
+        Scale magnetic sifter decision variables from [0,1] to physical units
+
+        Sifter: Decision variable ranges from original ExTrEMO code:
+        Sifter: - gap: [0.02, 0.10] mm (x[0]*0.08 + 0.02)
+        Sifter: - mag_len: [0.01, 0.10] mm (x[1]*0.09 + 0.01)
+        Sifter: - thickness: [0.002, 0.015] mm (x[2]*0.013 + 0.002)
+        """
+        scaled = torch.zeros_like(x)
+        scaled[:, 0] = 0.02 + x[:, 0] * 0.06  # Sifter: gap [0.02, 0.10] mm
+        scaled[:, 1] = 0.01 + x[:, 1] * 0.06  # Sifter: mag_len [0.01, 0.10] mm
+        scaled[:, 2] = 0.002 + x[:, 2] * 0.013  # Sifter: thickness [0.002, 0.015] mm
+        return scaled
+
+    # sifter: Scale Contexts
+    def scale_sifter_context(self, c):
+        """
+        Scale context from [0,1] to magnetic moment ranges
+
+        Sifter: Context scaling from Table II in ExTrEMO paper:
+        Sifter: - c[:, 0] (first dimension) is DUMMY/UNUSED for framework consistency
+        Sifter: - c[:, 1] (second dimension) controls ms1 (cell type 1 magnetic moment)
+        Sifter: - c[:, 2] (third dimension) controls ms2 (cell type 2 magnetic moment)
+
+        Sifter: Shrunk ranges for highly similar cells (as requested):
+        Sifter: - ms1 range: [1.5, 2.0] × 10^-13 (shrunk from [0.160, 3.130])
+        Sifter: - ms2 range: [0.5, 0.8] × 10^-13 (shrunk from [0.055, 0.656])
+        """
+        # Sifter: Scale magnetic moments to shrunk ranges for similar cells
+        ms1 = (1.5 + c[:, 1] * 0.5) * 1e-13  # Sifter: ms1 from [1.5, 2.0] × 10^-13
+        ms2 = (0.5 + c[:, 2] * 0.3) * 1e-13  # Sifter: ms2 from [0.5, 0.8] × 10^-13
+
+        return ms1, ms2
+
+    # sifter: sub-helper functions
+    def _calc_F_mag(self, gap, mag_len, t, cell_r):
+        """
+        Calculate magnetic field and gradients using magpylib (original implementation)
+
+        Sifter: This is the exact implementation from your provided code
+        Sifter: gap, mag_len, t are single float values (not tensors)
+        """
+        mag_max = 1.5  # Magnetization in mT
+        y_max = 100  # Distance in y for saturation, units in mm
+
+        # Sifter: Create 10 magnetic cuboid sources as in original
+        src1 = magpy.magnet.Cuboid(magnetization=(mag_max, 0, 0), dimension=(2 * mag_len, y_max, t),
+                                   position=(-1 * (4.5 * gap + 6.0 * mag_len), 0, 0))
+        src2 = magpy.magnet.Cuboid(magnetization=(mag_max, 0, 0), dimension=(mag_len, y_max, t),
+                                   position=(-1 * (3.5 * gap + 4.5 * mag_len), 0, 0))
+        src3 = magpy.magnet.Cuboid(magnetization=(mag_max, 0, 0), dimension=(mag_len, y_max, t),
+                                   position=(-1 * (2.5 * gap + 3.5 * mag_len), 0, 0))
+        src4 = magpy.magnet.Cuboid(magnetization=(mag_max, 0, 0), dimension=(2 * mag_len, y_max, t),
+                                   position=(-1 * (1.5 * gap + 2.0 * mag_len), 0, 0))
+        src5 = magpy.magnet.Cuboid(magnetization=(mag_max, 0, 0), dimension=(mag_len, y_max, t),
+                                   position=(-1 * (0.5 * gap + 0.5 * mag_len), 0, 0))
+        src6 = magpy.magnet.Cuboid(magnetization=(mag_max, 0, 0), dimension=(mag_len, y_max, t),
+                                   position=(1 * (0.5 * gap + 0.5 * mag_len), 0, 0))
+        src7 = magpy.magnet.Cuboid(magnetization=(mag_max, 0, 0), dimension=(2 * mag_len, y_max, t),
+                                   position=(1 * (1.5 * gap + 2.0 * mag_len), 0, 0))
+        src8 = magpy.magnet.Cuboid(magnetization=(mag_max, 0, 0), dimension=(mag_len, y_max, t),
+                                   position=(1 * (2.5 * gap + 3.5 * mag_len), 0, 0))
+        src9 = magpy.magnet.Cuboid(magnetization=(mag_max, 0, 0), dimension=(mag_len, y_max, t),
+                                   position=(1 * (3.5 * gap + 4.5 * mag_len), 0, 0))
+        src10 = magpy.magnet.Cuboid(magnetization=(mag_max, 0, 0), dimension=(2 * mag_len, y_max, t),
+                                    position=(1 * (4.5 * gap + 6.0 * mag_len), 0, 0))
+
+        c = magpy.Collection(src1, src2, src3, src4, src5, src6, src7, src8, src9, src10)
+
+        # Sifter: Create observation grid as in original
+        max_dim = max([gap, mag_len, t])
+        ts = np.arange(-2 * max_dim, 2 * max_dim, self.grid_res)
+        observer = np.array([[(x, 0., z) for x in ts] for z in ts])
+
+        # Sifter: Calculate magnetic field using magpylib
+        B = c.getB(observer)
+        B_mag = (B[:, :, 0] ** 2 + B[:, :, 1] ** 2 + B[:, :, 2] ** 2) ** 0.5
+        grad_B = np.gradient(B_mag, self.grid_res)  # grad_B[0] is dB_dz; grad_B[1] is dB_dx
+
+        return observer, grad_B[0], B_mag
+
+    def _calc_F_drag(self, gap, mag_len, Q, cell_r):
+        """
+        Calculate drag force (original implementation)
+        """
+        u_ave = (Q * 1e-6 / (3600 * 3913 * 4 * 4 * 1e-10)) * (0.6 * 0.6) / (((3 * gap) / (3 * gap + 4 * mag_len)) ** 2)
+        F_drag = 6 * np.pi * 0.001 * cell_r * u_ave * 1e-3
+        return F_drag
+
+    def _calc_dBdz(self, gap, t, cell_r, grid_res, dBdz, observer, ms, F_drag):
+        """
+        Calculate capture efficiency using original implementation
+
+        Sifter: This is the exact calc_dBdz function from your provided code
+        """
+        theta = np.linspace(0, 2 * np.pi, 120, endpoint=False)
+        x_part, y_part = cell_r * np.sin(theta), cell_r * np.cos(theta)
+        x_part_rd, y_part_rd = np.fix(cell_r * np.sin(theta) * 1e3) / 1e3, np.fix(cell_r * np.cos(theta) * 1e3) / 1e3
+
+        cell_all_loc_x = np.arange(0., (gap / 2 - cell_r), grid_res * 2)
+        cell_all_loc_z = np.arange(-t / 2 - 0.01, -0.003, grid_res)
+
+        CE_frac = 0.0
+
+        for b in cell_all_loc_z:
+            cell_z = b + y_part_rd
+            cur_max_dBdz = 0.0
+
+            for a in cell_all_loc_x:
+                cell_x = a + x_part_rd
+
+                dBdz_sum = 0.0
+                for i in range(len(cell_x)):
+                    cur_x = cell_x[i]
+                    cur_z = cell_z[i]
+
+                    xx_search = np.where(np.abs(observer[0, :, 0] - cur_x) < (grid_res) * 0.75)
+                    zz_search = np.where(np.abs(observer[:, 0, 2] - cur_z) < (grid_res) * 0.75)
+
+                    if len(xx_search[0]) > 0 and len(zz_search[0]) > 0:
+                        dBdz_sum += dBdz[zz_search[0][0], xx_search[0][0]]
+
+                dBdz_ave = dBdz_sum / len(cell_x)
+
+                if (dBdz_ave * ms * 30 > F_drag):
+                    cur_max_dBdz += 1
+
+            CE_frac_cur = cur_max_dBdz / (len(cell_all_loc_x)) if len(cell_all_loc_x) > 0 else 0.0
+
+            if (CE_frac_cur > CE_frac):
+                CE_frac = CE_frac_cur
+
+        return CE_frac
+
+    # sifter: helper function
+    def _calc_CE(self, gap, mag_len, t, grid_res, ms, Q, cell_r):
+        """
+        Calculate capture efficiency using original implementation
+
+        Sifter: This is the exact calc_CE function from your provided code
+        """
+        F_drag = self._calc_F_drag(gap, mag_len, Q, cell_r)
+        observer, dBdz, B_mag = self._calc_F_mag(gap, mag_len, t, cell_r)
+        CE = self._calc_dBdz(gap, t, cell_r, grid_res, dBdz, observer, ms, F_drag)
+        return CE
+
+    # sifter: Contextual Evaluation
+    def _contextual_magnetic_sifter(self, x, c):
+        """
+        Magnetic sifter evaluation with full magpylib simulation
+
+        Sifter: x: [batch_size, 3] - scaled design variables (gap, mag_len, thickness)
+        Sifter: c: (ms1, ms2) - scaled magnetic moments for both cell types
+        """
+        batch_size = x.shape[0]
+        ms1, ms2 = c
+
+        # Sifter: Convert tensors to numpy for magpylib compatibility
+        x_np = x.detach().cpu().numpy()
+        ms1_np = ms1.detach().cpu().numpy()
+        ms2_np = ms2.detach().cpu().numpy()
+
+        # Sifter: Initialize result arrays
+        f1_results = np.zeros(batch_size)
+        f2_results = np.zeros(batch_size)
+        f3_results = np.zeros(batch_size)
+
+        # Sifter: Process each sample in the batch individually
+        for i in range(batch_size):
+            gap = float(x_np[i, 0])
+            mag_len = float(x_np[i, 1])
+            thickness = float(x_np[i, 2])
+            ms1_val = float(ms1_np[i])
+            ms2_val = float(ms2_np[i])
+
+            # Sifter: Calculate capture efficiencies using full simulation
+            f1_raw = self._calc_CE(gap, mag_len, thickness, self.grid_res, ms1_val, self.Q, self.cell_r)
+            f2_raw = self._calc_CE(gap, mag_len, thickness, self.grid_res, ms2_val, self.Q, self.cell_r)
+
+            # Sifter: Construct objectives following original structure
+            # Sifter: Original: f = np.array([-f1, -(f1 - f2), f3 - 1])
+            # Sifter: Modified for minimization as requested:
+            f1_results[i] = f1_raw * 0.95  # Minimize unwanted cell capture (was -f1)
+            f2_results[i] = (f2_raw - f1_raw + 1.0) * 0.95  # Minimize negative separation (was -(f1-f2))
+            f3_results[i] = thickness / 0.015  # Normalize thickness to [0,1] for minimization
+
+        # Sifter: Convert results back to PyTorch tensors
+        f1_tensor = torch.tensor(f1_results, dtype=x.dtype, device=x.device)
+        f2_tensor = torch.tensor(f2_results, dtype=x.dtype, device=x.device)
+        f3_tensor = torch.tensor(f3_results, dtype=x.dtype, device=x.device)
+
+        return torch.stack([f1_tensor, f2_tensor, f3_tensor], dim=1)
+
     def evaluate(self, inputs: torch.Tensor) -> torch.Tensor:
         """
         Evaluate the contextual multi-objective function.
@@ -607,8 +817,14 @@ class ContextualMultiObjectiveFunction:
         x = inputs[:, :self.n_variables]
         c = inputs[:, self.n_variables:]
 
+        # Sifter: Added magnetic sifter evaluation branch
+        if self.func_name == 'magnetic_sifter':
+            x_scaled = self.scale_sifter_variables(x)
+            ms1, ms2 = self.scale_sifter_context(c)
+            return self._contextual_magnetic_sifter(x_scaled, (ms1, ms2))
+
         # turbine: Added turbine evaluation branch
-        if self.func_name == 'turbine':
+        elif self.func_name == 'turbine':
             x_scaled = self.scale_turbine_variables(x)
             wind_speed = self.scale_turbine_context(c)  # Returns 1D wind speed tensor
             return self._contextual_turbine(x_scaled, wind_speed)
@@ -708,13 +924,6 @@ class ContextualMultiObjectiveFunction:
                 )
 
         return f
-
-
-import torch
-import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.colors import ListedColormap
-import seaborn as sns
 
 
 # Assuming the ContextualMultiObjectiveFunction class is available
@@ -1172,14 +1381,231 @@ def visualize_bicopter_landscape():
     return fig, axes, fig_3d, X_bicopter, Y_bicopter
 
 
-# Bicopter DW: Example usage and testing
+# # Bicopter DW: Example usage and testing
+# if __name__ == "__main__":
+#     print("Starting Bicopter Landscape Visualization...")
+#     try:
+#         # Note: Make sure ContextualMultiObjectiveFunction with bicopter is imported
+#         fig_main, axes_main, fig_3d, X_data, Y_data = visualize_bicopter_landscape()
+#         print("\nVisualization completed successfully!")
+#         print(f"Generated data shapes: X={X_data.shape}, Y={Y_data.shape}")
+#     except Exception as e:
+#         print(f"Error during visualization: {e}")
+#         print("Make sure the ContextualMultiObjectiveFunction class with bicopter support is available.")
+
+import torch
+import numpy as np
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+from scipy.stats import pearsonr
+
+
+def visualize_magnetic_sifter_landscape_simplified():
+    """
+    Simplified visualization of magnetic sifter multi-objective function
+    Focus on objective space colored by context variables for clear analysis
+    """
+    import torch
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.mplot3d import Axes3D
+
+    # Set up the figure with cleaner layout
+    fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+    fig.suptitle('Magnetic Sifter Multi-Objective Optimization: Objective Space Analysis',
+                 fontsize=16, fontweight='bold')
+
+    # Test parameters
+    n_samples = 100  # 100 random solutions as requested
+
+    print("Generating 100 random solutions for Magnetic Sifter Problem...")
+
+    # =====================================================
+    # Step 1: Initialize magnetic sifter problem
+    # =====================================================
+    sifter_problem = ContextualMultiObjectiveFunction(func_name='magnetic_sifter')
+
+    print(f"Problem Configuration:")
+    print(f"  Objectives: {sifter_problem.n_objectives} (f1: unwanted capture, f2: separation, f3: thickness)")
+    print(f"  Variables: {sifter_problem.n_variables} (gap, mag_len, thickness)")
+    print(f"  Context dim: {sifter_problem.context_dim} (dummy, ms1, ms2)")
+
+    # =====================================================
+    # Step 2: Generate random solutions
+    # =====================================================
+    # Random sampling: [3 design vars + 3 context vars] all in [0,1]
+    X_sifter = torch.rand(n_samples, sifter_problem.n_variables + sifter_problem.context_dim)
+
+    print("Evaluating solutions...")
+    # Evaluate all solutions
+    Y_sifter = sifter_problem.evaluate(X_sifter)
+
+    print(f"Evaluation complete!")
+    print(f"Input shape: {X_sifter.shape}")
+    print(f"Output shape: {Y_sifter.shape}")
+
+    # Extract variables for plotting
+    ms1_norm = X_sifter[:, 4].numpy()  # ms1 context (skip dummy at index 3)
+    ms2_norm = X_sifter[:, 5].numpy()  # ms2 context
+
+    f1 = Y_sifter[:, 0].numpy()  # Unwanted capture (minimize)
+    f2 = Y_sifter[:, 1].numpy()  # Separation (minimize)
+    f3 = Y_sifter[:, 2].numpy()  # Thickness (minimize)
+
+    print(f"Objective Ranges:")
+    print(f"  f1 (unwanted): [{f1.min():.4f}, {f1.max():.4f}]")
+    print(f"  f2 (separation): [{f2.min():.4f}, {f2.max():.4f}]")
+    print(f"  f3 (thickness): [{f3.min():.4f}, {f3.max():.4f}]")
+
+    # =====================================================
+    # Plot 1: f1 vs f2 colored by ms1
+    # =====================================================
+    scatter1 = axes[0, 0].scatter(f1, f2, c=ms1_norm, cmap='viridis',
+                                  alpha=0.8, s=60, edgecolors='black', linewidth=0.5)
+    axes[0, 0].set_title('Objective Space: f1 vs f2\nColored by ms1 (Cell Type 1 Magnetic Moment)',
+                         fontsize=12, fontweight='bold')
+    axes[0, 0].set_xlabel('f1: Unwanted Capture (minimize)', fontweight='bold')
+    axes[0, 0].set_ylabel('f2: Separation (minimize)', fontweight='bold')
+    cbar1 = plt.colorbar(scatter1, ax=axes[0, 0])
+    cbar1.set_label('ms1 (normalized)', fontweight='bold')
+    axes[0, 0].grid(True, alpha=0.3)
+
+    # =====================================================
+    # Plot 2: f1 vs f2 colored by ms2
+    # =====================================================
+    scatter2 = axes[0, 1].scatter(f1, f2, c=ms2_norm, cmap='plasma',
+                                  alpha=0.8, s=60, edgecolors='black', linewidth=0.5)
+    axes[0, 1].set_title('Objective Space: f1 vs f2\nColored by ms2 (Cell Type 2 Magnetic Moment)',
+                         fontsize=12, fontweight='bold')
+    axes[0, 1].set_xlabel('f1: Unwanted Capture (minimize)', fontweight='bold')
+    axes[0, 1].set_ylabel('f2: Separation (minimize)', fontweight='bold')
+    cbar2 = plt.colorbar(scatter2, ax=axes[0, 1])
+    cbar2.set_label('ms2 (normalized)', fontweight='bold')
+    axes[0, 1].grid(True, alpha=0.3)
+
+    # =====================================================
+    # Plot 3: f1 vs f3 colored by ms1
+    # =====================================================
+    scatter3 = axes[1, 0].scatter(f1, f3, c=ms1_norm, cmap='coolwarm',
+                                  alpha=0.8, s=60, edgecolors='black', linewidth=0.5)
+    axes[1, 0].set_title('Objective Space: f1 vs f3\nColored by ms1',
+                         fontsize=12, fontweight='bold')
+    axes[1, 0].set_xlabel('f1: Unwanted Capture (minimize)', fontweight='bold')
+    axes[1, 0].set_ylabel('f3: Thickness (minimize)', fontweight='bold')
+    cbar3 = plt.colorbar(scatter3, ax=axes[1, 0])
+    cbar3.set_label('ms1 (normalized)', fontweight='bold')
+    axes[1, 0].grid(True, alpha=0.3)
+
+    # =====================================================
+    # Plot 4: f2 vs f3 colored by ms2
+    # =====================================================
+    scatter4 = axes[1, 1].scatter(f2, f3, c=ms2_norm, cmap='spring',
+                                  alpha=0.8, s=60, edgecolors='black', linewidth=0.5)
+    axes[1, 1].set_title('Objective Space: f2 vs f3\nColored by ms2',
+                         fontsize=12, fontweight='bold')
+    axes[1, 1].set_xlabel('f2: Separation (minimize)', fontweight='bold')
+    axes[1, 1].set_ylabel('f3: Thickness (minimize)', fontweight='bold')
+    cbar4 = plt.colorbar(scatter4, ax=axes[1, 1])
+    cbar4.set_label('ms2 (normalized)', fontweight='bold')
+    axes[1, 1].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.show()
+
+    # =====================================================
+    # 3D Objective Space Visualization
+    # =====================================================
+    fig_3d = plt.figure(figsize=(16, 6))
+
+    # 3D Plot 1: All objectives colored by ms1
+    ax1 = fig_3d.add_subplot(121, projection='3d')
+    scatter_3d1 = ax1.scatter(f1, f2, f3, c=ms1_norm, cmap='viridis',
+                              alpha=0.8, s=60, edgecolors='black', linewidth=0.5)
+    ax1.set_xlabel('f1: Unwanted Capture', fontweight='bold')
+    ax1.set_ylabel('f2: Separation', fontweight='bold')
+    ax1.set_zlabel('f3: Thickness', fontweight='bold')
+    ax1.set_title('3D Objective Space\nColored by ms1', fontsize=12, fontweight='bold')
+    cbar_3d1 = fig_3d.colorbar(scatter_3d1, ax=ax1, shrink=0.5)
+    cbar_3d1.set_label('ms1 (normalized)', fontweight='bold')
+
+    # 3D Plot 2: All objectives colored by ms2
+    ax2 = fig_3d.add_subplot(122, projection='3d')
+    scatter_3d2 = ax2.scatter(f1, f2, f3, c=ms2_norm, cmap='plasma',
+                              alpha=0.8, s=60, edgecolors='black', linewidth=0.5)
+    ax2.set_xlabel('f1: Unwanted Capture', fontweight='bold')
+    ax2.set_ylabel('f2: Separation', fontweight='bold')
+    ax2.set_zlabel('f3: Thickness', fontweight='bold')
+    ax2.set_title('3D Objective Space\nColored by ms2', fontsize=12, fontweight='bold')
+    cbar_3d2 = fig_3d.colorbar(scatter_3d2, ax=ax2, shrink=0.5)
+    cbar_3d2.set_label('ms2 (normalized)', fontweight='bold')
+
+    plt.tight_layout()
+    plt.show()
+
+    # =====================================================
+    # Analysis Summary
+    # =====================================================
+    print("\n" + "=" * 60)
+    print("CONTEXT SENSITIVITY ANALYSIS")
+    print("=" * 60)
+
+    # Convert to physical units for better interpretation
+    ms1_physical = (1.5 + ms1_norm * 0.5) * 1e-13  # [1.5, 2.0] × 10^-13
+    ms2_physical = (0.5 + ms2_norm * 0.3) * 1e-13  # [0.5, 0.8] × 10^-13
+
+    print(f"Context Variable Ranges (Physical Units):")
+    print(f"  ms1: {ms1_physical.min():.2e} - {ms1_physical.max():.2e}")
+    print(f"  ms2: {ms2_physical.min():.2e} - {ms2_physical.max():.2e}")
+
+    # Correlation analysis
+    from scipy.stats import pearsonr
+
+    ms1_f1_corr, _ = pearsonr(ms1_norm, f1)
+    ms1_f2_corr, _ = pearsonr(ms1_norm, f2)
+    ms1_f3_corr, _ = pearsonr(ms1_norm, f3)
+    ms2_f1_corr, _ = pearsonr(ms2_norm, f1)
+    ms2_f2_corr, _ = pearsonr(ms2_norm, f2)
+    ms2_f3_corr, _ = pearsonr(ms2_norm, f3)
+
+    print(f"\nCorrelation Analysis:")
+    print(f"  ms1 vs f1 (unwanted): {ms1_f1_corr:+.3f}")
+    print(f"  ms1 vs f2 (separation): {ms1_f2_corr:+.3f}")
+    print(f"  ms1 vs f3 (thickness): {ms1_f3_corr:+.3f}")
+    print(f"  ms2 vs f1 (unwanted): {ms2_f1_corr:+.3f}")
+    print(f"  ms2 vs f2 (separation): {ms2_f2_corr:+.3f}")
+    print(f"  ms2 vs f3 (thickness): {ms2_f3_corr:+.3f}")
+
+    # Find best solutions
+    best_f1_idx = np.argmin(f1)
+    best_f2_idx = np.argmin(f2)
+    best_f3_idx = np.argmin(f3)
+
+    print(f"\nBest Solutions:")
+    print(f"  Best Unwanted Capture (f1): {f1[best_f1_idx]:.4f}")
+    print(f"    ms1: {ms1_physical[best_f1_idx]:.2e}, ms2: {ms2_physical[best_f1_idx]:.2e}")
+    print(f"  Best Separation (f2): {f2[best_f2_idx]:.4f}")
+    print(f"    ms1: {ms1_physical[best_f2_idx]:.2e}, ms2: {ms2_physical[best_f2_idx]:.2e}")
+    print(f"  Best Thickness (f3): {f3[best_f3_idx]:.4f}")
+    print(f"    ms1: {ms1_physical[best_f3_idx]:.2e}, ms2: {ms2_physical[best_f3_idx]:.2e}")
+
+    # Context preferences for good performance
+    print(f"\nContext Preferences (best 25% solutions):")
+
+    best_f1_mask = f1 <= np.percentile(f1, 25)
+    best_f2_mask = f2 <= np.percentile(f2, 25)
+
+    print(f"  For low unwanted capture:")
+    print(f"    Preferred ms1: {ms1_norm[best_f1_mask].mean():.3f} ± {ms1_norm[best_f1_mask].std():.3f}")
+    print(f"    Preferred ms2: {ms2_norm[best_f1_mask].mean():.3f} ± {ms2_norm[best_f1_mask].std():.3f}")
+
+    print(f"  For good separation:")
+    print(f"    Preferred ms1: {ms1_norm[best_f2_mask].mean():.3f} ± {ms1_norm[best_f2_mask].std():.3f}")
+    print(f"    Preferred ms2: {ms2_norm[best_f2_mask].mean():.3f} ± {ms2_norm[best_f2_mask].std():.3f}")
+
+    return fig, fig_3d, X_sifter, Y_sifter
+
+
+# Usage example:
 if __name__ == "__main__":
-    print("Starting Bicopter Landscape Visualization...")
-    try:
-        # Note: Make sure ContextualMultiObjectiveFunction with bicopter is imported
-        fig_main, axes_main, fig_3d, X_data, Y_data = visualize_bicopter_landscape()
-        print("\nVisualization completed successfully!")
-        print(f"Generated data shapes: X={X_data.shape}, Y={Y_data.shape}")
-    except Exception as e:
-        print(f"Error during visualization: {e}")
-        print("Make sure the ContextualMultiObjectiveFunction class with bicopter support is available.")
+    # Make sure the ContextualMultiObjectiveFunction class is loaded
+    fig_2d, fig_3d, X, Y = visualize_magnetic_sifter_landscape_simplified()

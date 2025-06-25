@@ -33,7 +33,7 @@ def parse_arguments():
     parser = argparse.ArgumentParser(description='Run DTLZ optimization experiments')
     parser.add_argument('--problem', type=str, default='dtlz2',
                        choices=['dtlz1', 'dtlz2', 'dtlz3', 'dtlz4',
-                                'dtlz5', 'dtlz6', 'dtlz7', 'turbine', 'bicopter'],
+                                'dtlz5', 'dtlz6', 'dtlz7', 'turbine', 'bicopter', 'magnetic_sifter'],
                        help='DTLZ problem to optimize (default: dtlz2)')
     parser.add_argument('--n_runs', type=int, default=1,
                        help='Number of optimization runs (default: 1)')
