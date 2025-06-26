@@ -250,10 +250,26 @@ class ContextualMultiObjectiveFunction:
             self.grid_res = 0.0005
             self.Q = 15  # mL/hr flow rate
             self.cell_r = 0.0075  # Cell radius in mm
+
+        elif self.func_name == 'gridshell':
+            self.n_objectives = 2  # Gridshell: morning power + evening power (both minimized)
+
+            # Gridshell: Grid dimensions - configurable
+            self.numX = 5  # Default 5x5 grid, can be made configurable
+            self.numY = 5
+            self.n_variables = (self.numX - 2) * (self.numY - 2)  # Only interior points are variables
+            self.context_dim = 2  # Gridshell: 1 dummy + 1 building orientation
+
+            # Gridshell: Fixed solar parameters (as torch tensors)
+            self.morning_sun = torch.tensor([-0.5, -0.5, -0.6])  # Morning sun direction
+            self.evening_sun = torch.tensor([-0.5, 0.5, -0.6])   # Evening sun direction
+            self.regularizer_weight = 0.2  # Balance between power and smoothness
+
         elif self.func_name == 'turbine':
             self.n_objectives = 2  # Turbine DW: mass proxy + negative power (both minimized)
             self.n_variables = 3  # Turbine DW: radius, height, pitch (design variables)
             self.context_dim = 2  # Turbine DW: wind speed + dummy variable for DTLZ framework consistency
+
         elif self.func_name == 'bicopter':
             self.n_objectives = 2  # Bicopter DW: distance to goal + energy consumption (both minimized)
             self.n_variables = 12  # Bicopter DW: 6 time steps × 2 actuators = 12 control variables
@@ -285,6 +301,9 @@ class ContextualMultiObjectiveFunction:
         # Sifter: Nadir point - will be set empirically later as requested
         if self.func_name == 'magnetic_sifter':
             self.nadir_point = torch.tensor([1.0, 1.0, 1.0])  # Placeholder - to be determined empirically
+        elif self.func_name == 'gridshell':
+            # Gridshell: Nadir point - to be determined empirically
+            self.nadir_point = torch.tensor([1.0, 1.0])
         elif self.func_name == 'turbine':
             # Turbine DW: Nadir point determination - NEEDS EMPIRICAL VERIFICATION
             # Turbine DW: WARNING: (1.0, 1.0) assumes worst case occurs at normalization bounds
@@ -805,6 +824,212 @@ class ContextualMultiObjectiveFunction:
 
         return torch.stack([f1_tensor, f2_tensor, f3_tensor], dim=1)
 
+    # GridShell:
+    def scale_gridshell_variables(self, x):
+        """
+        Scale gridshell decision variables from [0,1] to height values
+
+        Gridshell: Decision variable ranges explained:
+        Gridshell: - Each interior grid point z-coordinate: [0, 5] units (height/elevation)
+        Gridshell: - Only interior points (numX-2)×(numY-2) are optimizable
+        Gridshell: - Boundary points are fixed at z=0
+        """
+        # Gridshell: Scale all interior point heights from [0,1] to [0,5]
+        scaled = x * 5.0  # Map [0,1] to [0,5] height units
+        return scaled
+
+    def scale_gridshell_context(self, c):
+        """
+        Scale context from [0,1] to building orientation angle [0, 2π]
+
+        Gridshell: Context scaling explained:
+        Gridshell: - c[:, 0] (first dimension) is DUMMY/UNUSED for framework consistency
+        Gridshell: - c[:, 1] (second dimension) controls building orientation
+        Gridshell: - Range [0, 2π] radians (full 360° rotation)
+        Gridshell: - Controls how building is oriented relative to sun positions
+
+        Args:
+            c: [batch_size, 2] context variables in [0,1]
+
+        Returns:
+            house_theta: [batch_size] building orientation angles in [0,2π]
+        """
+        house_theta = c[:, 1] * 0.5 * torch.pi  # Building orientation angle from c[:, 1]
+        return house_theta
+
+    def _rotate_about_z(self, theta, vec):
+        """
+        Rotate 3D vector about Z-axis by angle theta
+
+        Args:
+            theta: [batch_size] rotation angles in radians
+            vec: [batch_size, 3] or [3] vectors to rotate
+
+        Returns:
+            rotated_vec: [batch_size, 3] rotated vectors
+        """
+        batch_size = theta.shape[0]
+        device = theta.device
+        dtype = theta.dtype
+
+        # Create rotation matrices for each angle
+        cos_theta = torch.cos(theta)
+        sin_theta = torch.sin(theta)
+
+        # Build rotation matrix: [cos -sin 0; sin cos 0; 0 0 1]
+        rot_matrices = torch.zeros(batch_size, 3, 3, device=device, dtype=dtype)
+        rot_matrices[:, 0, 0] = cos_theta
+        rot_matrices[:, 0, 1] = -sin_theta
+        rot_matrices[:, 1, 0] = sin_theta
+        rot_matrices[:, 1, 1] = cos_theta
+        rot_matrices[:, 2, 2] = 1.0
+
+        # Handle broadcasting for vector input
+        if vec.dim() == 1:  # Single vector [3]
+            vec_expanded = vec.unsqueeze(0).expand(batch_size, -1).to(device)
+        else:  # Already [batch_size, 3]
+            vec_expanded = vec.to(device)
+
+        # Apply rotation: vec_out = R @ vec
+        rotated_vec = torch.bmm(rot_matrices, vec_expanded.unsqueeze(-1)).squeeze(-1)
+
+        return rotated_vec
+
+    def _reconstruct_grid(self, x_interior, numX, numY):
+        """
+        Reconstruct full grid from interior point variables
+
+        Args:
+            x_interior: [batch_size, (numX-2)*(numY-2)] interior point heights
+            numX, numY: Grid dimensions
+
+        Returns:
+            pts_grid: [batch_size, numX, numY] full grid with fixed boundaries
+        """
+        batch_size = x_interior.shape[0]
+        device = x_interior.device
+        dtype = x_interior.dtype
+
+        # Initialize full grid with zeros (boundary conditions)
+        pts_grid = torch.zeros(batch_size, numX, numY, device=device, dtype=dtype)
+
+        # Reshape interior variables to 2D grid layout
+        interior_2d = x_interior.view(batch_size, numX - 2, numY - 2)
+
+        # Place interior variables in the center of the grid
+        pts_grid[:, 1:-1, 1:-1] = interior_2d
+
+        return pts_grid
+
+    def _gridshell_smoothness(self, pts_grid):
+        """
+        Calculate smoothness regularization term
+
+        Args:
+            pts_grid: [batch_size, numX, numY] grid of z-coordinates
+
+        Returns:
+            smoothness: [batch_size] smoothness penalty values
+        """
+        batch_size, numX, numY = pts_grid.shape
+
+        # Calculate first derivatives (differences)
+        diff_y = (pts_grid[:, 1:, :] - pts_grid[:, :-1, :]) * numY  # [batch_size, numX-1, numY]
+        diff_x = (pts_grid[:, :, 1:] - pts_grid[:, :, :-1]) * numX  # [batch_size, numX, numY-1]
+
+        # Calculate second derivatives (differences of differences)
+        diff_y2 = (diff_y[:, 1:, :] - diff_y[:, :-1, :]) * numY  # [batch_size, numX-2, numY]
+        diff_x2 = (diff_x[:, :, 1:] - diff_x[:, :, :-1]) * numX  # [batch_size, numX, numY-2]
+
+        # Sum squared second derivatives
+        smoothness_y = torch.sum(diff_y2 ** 2, dim=(1, 2)) / numY  # [batch_size]
+        smoothness_x = torch.sum(diff_x2 ** 2, dim=(1, 2)) / numX  # [batch_size]
+
+        # Total smoothness penalty (normalized as in MATLAB)
+        smoothness = (smoothness_y + smoothness_x) / 1000000.0
+
+        return smoothness
+
+    def _gridshell_power_output(self, pts_grid, sun_dir, house_theta):
+        """
+        Calculate solar power output using vectorized surface normal computation
+
+        Args:
+            pts_grid: [batch_size, numX, numY] grid of z-coordinates
+            sun_dir: [3] sun direction vector (morning or evening)
+            house_theta: [batch_size] building orientation angles
+
+        Returns:
+            power: [batch_size] normalized power output values
+        """
+        batch_size, numX, numY = pts_grid.shape
+        device = pts_grid.device
+
+        # Ensure sun_dir is on correct device
+        sun_dir = sun_dir.to(device)
+
+        # Normalize sun direction
+        sun_dir_norm = sun_dir / torch.norm(sun_dir)
+
+        # Rotate sun direction by -house_theta to account for building orientation
+        sun_dir_rotated = self._rotate_about_z(-house_theta, sun_dir_norm)  # [batch_size, 3]
+
+        # Calculate surface differences for triangulation
+        # vec1: horizontal differences (j+1) - (j)
+        vec1 = pts_grid[:, :, 1:] - pts_grid[:, :, :-1]  # [batch_size, numX, numY-1]
+        # vec2: vertical differences (i+1) - (i)
+        vec2 = pts_grid[:, 1:, :] - pts_grid[:, :-1, :]  # [batch_size, numX-1, numY]
+
+        # === TRIANGLE A CALCULATIONS (upper-left triangles) ===
+        # Take overlapping region for triangle A: [batch_size, numX-1, numY-1]
+        vec1_A = vec1[:, :-1, :]  # Crop last row: [batch_size, numX-1, numY-1]
+        vec2_A = vec2[:, :, :-1]  # Crop last col: [batch_size, numX-1, numY-1]
+
+        # Build 3D vectors for cross product: [0, 1, vec1] × [1, 0, vec2]
+        zeros = torch.zeros_like(vec1_A)
+        ones = torch.ones_like(vec1_A)
+
+        # First vector: [0, 1, vec1_A]
+        v1_A = torch.stack([zeros, ones, vec1_A], dim=-1)  # [batch_size, numX-1, numY-1, 3]
+        # Second vector: [1, 0, vec2_A]
+        v2_A = torch.stack([ones, zeros, vec2_A], dim=-1)  # [batch_size, numX-1, numY-1, 3]
+
+        # Vectorized cross product and normalization
+        normals_A = torch.cross(v1_A, v2_A, dim=-1)  # [batch_size, numX-1, numY-1, 3]
+        norms_A = torch.norm(normals_A, dim=-1, keepdim=True)  # [batch_size, numX-1, numY-1, 1]
+        normals_A_unit = normals_A / (norms_A + 1e-8)  # Avoid division by zero
+
+        # Calculate incidence angles
+        sun_expanded = sun_dir_rotated.unsqueeze(1).unsqueeze(1)  # [batch_size, 1, 1, 3]
+        dots_A = torch.sum(normals_A_unit * sun_expanded, dim=-1)  # [batch_size, numX-1, numY-1]
+        incidence_A = 1 - dots_A ** 2  # [batch_size, numX-1, numY-1]
+
+        # === TRIANGLE B CALCULATIONS (lower-right triangles) ===
+        # Match MATLAB indexing exactly: vec1(2:end, :) and vec2(:, 2:end)
+        vec1_B = -vec1[:, 1:, :]  # Crop first row: [batch_size, numX-1, numY-1]
+        vec2_B = -vec2[:, :, 1:]  # Crop first col: [batch_size, numX-1, numY-1]
+
+        # Build 3D vectors: [0, -1, -vec1] × [-1, 0, -vec2]
+        v1_B = torch.stack([zeros, -ones, vec1_B], dim=-1)  # [batch_size, numX-1, numY-1, 3]
+        v2_B = torch.stack([-ones, zeros, vec2_B], dim=-1)  # [batch_size, numX-1, numY-1, 3]
+
+        # Vectorized cross product and normalization
+        normals_B = torch.cross(v1_B, v2_B, dim=-1)  # [batch_size, numX-1, numY-1, 3]
+        norms_B = torch.norm(normals_B, dim=-1, keepdim=True)
+        normals_B_unit = normals_B / (norms_B + 1e-8)
+
+        # Calculate incidence angles
+        dots_B = torch.sum(normals_B_unit * sun_expanded, dim=-1)
+        incidence_B = 1 - dots_B ** 2
+
+        # === TOTAL POWER CALCULATION ===
+        # Sum all triangle contributions and normalize
+        total_incidence = torch.sum(incidence_A, dim=(1, 2)) + torch.sum(incidence_B, dim=(1, 2))
+        num_triangles = 2 * (numX - 1) * (numY - 1)  # Each quad has 2 triangles
+        power = total_incidence / num_triangles  # [batch_size]
+
+        return power
+
     def evaluate(self, inputs: torch.Tensor) -> torch.Tensor:
         """
         Evaluate the contextual multi-objective function.
@@ -822,6 +1047,12 @@ class ContextualMultiObjectiveFunction:
             x_scaled = self.scale_sifter_variables(x)
             ms1, ms2 = self.scale_sifter_context(c)
             return self._contextual_magnetic_sifter(x_scaled, (ms1, ms2))
+
+        # GridShell
+        elif self.func_name == 'gridshell':
+            x_scaled = self.scale_gridshell_variables(x)
+            house_theta = self.scale_gridshell_context(c)
+            return self._contextual_gridshell(x_scaled, house_theta)
 
         # turbine: Added turbine evaluation branch
         elif self.func_name == 'turbine':
@@ -924,6 +1155,45 @@ class ContextualMultiObjectiveFunction:
                 )
 
         return f
+
+    def _contextual_gridshell(self, x, c):
+        """
+        Gridshell evaluation with morning and evening power objectives
+
+        Args:
+            x: [batch_size, (numX-2)*(numY-2)] scaled interior grid heights
+            c: [batch_size] scaled building orientation angles
+
+        Returns:
+            objectives: [batch_size, 2] - [morning_power, evening_power]
+        """
+        batch_size = x.shape[0]
+        numX, numY = self.numX, self.numY
+
+        # Reconstruct full grid from interior variables
+        pts_grid = self._reconstruct_grid(x, numX, numY)  # [batch_size, numX, numY]
+
+        # Calculate smoothness penalty
+        smoothness = self._gridshell_smoothness(pts_grid)  # [batch_size]
+
+        # Calculate morning power output
+        morning_power = self._gridshell_power_output(
+            pts_grid, self.morning_sun, c)  # [batch_size]
+
+        # Calculate evening power output
+        evening_power = self._gridshell_power_output(
+            pts_grid, self.evening_sun, c)  # [batch_size]
+
+        # Combine power and smoothness with regularization
+        # For minimization objectives: minimize negative power + smoothness penalty
+        f1 = -morning_power + self.regularizer_weight * smoothness  # Minimize negative morning power
+        min_output_1, max_output_1 = -0.85, -0.40
+        f1 = (f1 - min_output_1) / (max_output_1 - min_output_1)
+        f2 = -evening_power + self.regularizer_weight * smoothness  # Minimize negative evening power
+        min_output_2, max_output_2 = -0.85, -0.40
+        f2 = (f2 - min_output_2) / (max_output_2 - min_output_2)
+
+        return torch.stack([f1, f2], dim=1)
 
 
 # Assuming the ContextualMultiObjectiveFunction class is available
@@ -1101,22 +1371,6 @@ def visualize_turbine_landscape():
     print(f"  Pitch: {pitch_physical[best_power_idx]:.1f}°, Wind: {wind_speed_physical[best_power_idx]:.1f}m/s")
 
     return fig, axes, X_turbine, Y_turbine
-
-
-# # Example usage
-# if __name__ == "__main__":
-#     # Turbine DW: Run the turbine landscape visualization
-#     fig, axes, inputs, outputs = visualize_turbine_landscape()
-#
-#     print(f"\nVisualization complete!")
-#     print(f"Generated {inputs.shape[0]} solutions for analysis")
-#     print(f"Turbine problem has {inputs.shape[1] - 2} design variables and 2 context dimensions")
-#     print(f"Outputs: {outputs.shape[1]} objectives (mass, power)")
-
-import torch
-import numpy as np
-import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
 
 
 def visualize_bicopter_landscape():
@@ -1605,7 +1859,318 @@ def visualize_magnetic_sifter_landscape_simplified():
     return fig, fig_3d, X_sifter, Y_sifter
 
 
-# Usage example:
+import torch
+import numpy as np
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+from scipy.stats import pearsonr
+
+
+def visualize_gridshell_landscape():
+    """
+    Visualize the landscape of gridshell multi-objective function
+    Step 1: Initialize solutions in a large pool
+    Step 2: Evaluate the solutions
+    Step 3: Visualize the solutions and analyze context sensitivity
+    """
+
+    # Set up the figure
+    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    fig.suptitle('Gridshell Solar Building Optimization Landscape', fontsize=16)
+
+    # Test parameters
+    n_samples = 10000  # Gridshell: Large pool of solutions for comprehensive visualization
+
+    print("Visualizing Gridshell Problem Landscape...")
+
+    # =====================================================
+    # Step 1: Initialize gridshell problem
+    # =====================================================
+    gridshell_problem = ContextualMultiObjectiveFunction(func_name='gridshell')
+
+    # =====================================================
+    # Step 2: Generate and evaluate solutions
+    # =====================================================
+
+    # Gridshell: Input format [9 interior heights, dummy_context, building_orientation]
+    # All values in [0,1] will be scaled appropriately by the class
+    X_gridshell = torch.rand(n_samples, gridshell_problem.n_variables + gridshell_problem.context_dim)
+
+    # Step 3: Evaluate gridshell solutions
+    Y_gridshell = gridshell_problem.evaluate(X_gridshell)
+
+    print(f"Gridshell Problem Analysis:")
+    print(f"Input shape: {X_gridshell.shape}")
+    print(f"Output shape: {Y_gridshell.shape}")
+    print(f"Morning power objective range: [{Y_gridshell[:, 0].min():.6f}, {Y_gridshell[:, 0].max():.6f}]")
+    print(f"Evening power objective range: [{Y_gridshell[:, 1].min():.6f}, {Y_gridshell[:, 1].max():.6f}]")
+
+    # Extract design variables and context for analysis
+    heights_mean = X_gridshell[:, :9].mean(dim=1).numpy()  # Gridshell: Average interior height
+    heights_std = X_gridshell[:, :9].std(dim=1).numpy()  # Gridshell: Height variation (roughness)
+    heights_max = X_gridshell[:, :9].max(dim=1)[0].numpy()  # Gridshell: Maximum height
+    heights_min = X_gridshell[:, :9].min(dim=1)[0].numpy()  # Gridshell: Minimum height
+    orientation_norm = X_gridshell[:, 10].numpy()  # Gridshell: Normalized orientation [0,1] (skip dummy at index 9)
+
+    morning_obj = Y_gridshell[:, 0].numpy()  # Gridshell: Morning power objective (minimize negative power)
+    evening_obj = Y_gridshell[:, 1].numpy()  # Gridshell: Evening power objective (minimize negative power)
+
+    # =====================================================
+    # Plot 1: Main Objective Space (Morning vs Evening Power)
+    # =====================================================
+    # Gridshell: Color by building orientation to show context dependency
+    scatter1 = axes[0, 0].scatter(morning_obj, evening_obj, c=orientation_norm,
+                                  cmap='viridis', alpha=0.7, s=30)
+    axes[0, 0].set_title('Objective Space: Morning vs Evening Power\n(colored by building orientation)', fontsize=12)
+    axes[0, 0].set_xlabel('Morning Power Objective (f1) - Minimize')
+    axes[0, 0].set_ylabel('Evening Power Objective (f2) - Minimize')
+    cbar1 = plt.colorbar(scatter1, ax=axes[0, 0])
+    cbar1.set_label('Building Orientation (normalized [0,1])')
+    axes[0, 0].grid(True, alpha=0.3)
+
+    # =====================================================
+    # Plot 2: Surface Characteristics - Height Mean vs Variation
+    # =====================================================
+    scatter2 = axes[0, 1].scatter(heights_mean, heights_std, c=morning_obj,
+                                  cmap='plasma', alpha=0.7, s=30)
+    axes[0, 1].set_title('Surface Characteristics: Mean vs Variation\n(colored by morning power)', fontsize=12)
+    axes[0, 1].set_xlabel('Average Interior Height')
+    axes[0, 1].set_ylabel('Height Variation (Std Dev)')
+    cbar2 = plt.colorbar(scatter2, ax=axes[0, 1])
+    cbar2.set_label('Morning Power Objective')
+    axes[0, 1].grid(True, alpha=0.3)
+
+    # =====================================================
+    # Plot 3: Orientation Sensitivity
+    # =====================================================
+    scatter3 = axes[0, 2].scatter(orientation_norm, morning_obj, c=evening_obj,
+                                  cmap='coolwarm', alpha=0.7, s=30)
+    axes[0, 2].set_title('Orientation Sensitivity: Angle vs Morning Power\n(colored by evening power)', fontsize=12)
+    axes[0, 2].set_xlabel('Building Orientation (normalized [0,1])')
+    axes[0, 2].set_ylabel('Morning Power Objective (f1)')
+    cbar3 = plt.colorbar(scatter3, ax=axes[0, 2])
+    cbar3.set_label('Evening Power Objective')
+    axes[0, 2].grid(True, alpha=0.3)
+
+    # =====================================================
+    # Plot 4: Height Range vs Performance
+    # =====================================================
+    height_range = heights_max - heights_min
+    scatter4 = axes[1, 0].scatter(height_range, evening_obj, c=orientation_norm,
+                                  cmap='RdYlBu', alpha=0.7, s=30)
+    axes[1, 0].set_title('Height Range vs Evening Power\n(colored by orientation)', fontsize=12)
+    axes[1, 0].set_xlabel('Height Range (max - min)')
+    axes[1, 0].set_ylabel('Evening Power Objective (f2)')
+    cbar4 = plt.colorbar(scatter4, ax=axes[1, 0])
+    cbar4.set_label('Building Orientation')
+    axes[1, 0].grid(True, alpha=0.3)
+
+    # =====================================================
+    # Plot 5: Surface Smoothness Analysis
+    # =====================================================
+    # Gridshell: Show relationship between surface characteristics and performance
+    scatter5 = axes[1, 1].scatter(heights_mean, height_range, c=(morning_obj + evening_obj),
+                                  cmap='spring', alpha=0.7, s=30)
+    axes[1, 1].set_title('Surface Design Space: Mean vs Range\n(colored by total power)', fontsize=12)
+    axes[1, 1].set_xlabel('Average Interior Height')
+    axes[1, 1].set_ylabel('Height Range')
+    cbar5 = plt.colorbar(scatter5, ax=axes[1, 1])
+    cbar5.set_label('Total Power Objective (f1+f2)')
+    axes[1, 1].grid(True, alpha=0.3)
+
+    # =====================================================
+    # Plot 6: Pareto Front Analysis by Orientation
+    # =====================================================
+    # Gridshell: Identify approximate Pareto fronts for different orientation categories
+
+    # Separate solutions by orientation bins
+    orientation_bins = np.linspace(0, 1, 4)  # 3 orientation ranges
+    colors = ['red', 'blue', 'green']
+
+    for i in range(len(orientation_bins) - 1):
+        mask = (orientation_norm >= orientation_bins[i]) & (orientation_norm < orientation_bins[i + 1])
+        if np.sum(mask) > 0:
+            axes[1, 2].scatter(morning_obj[mask], evening_obj[mask],
+                               c=colors[i], alpha=0.6, s=20,
+                               label=f'Orientation {orientation_bins[i]:.1f}-{orientation_bins[i + 1]:.1f}')
+
+    axes[1, 2].set_title('Pareto Front by Orientation Ranges', fontsize=12)
+    axes[1, 2].set_xlabel('Morning Power Objective (f1)')
+    axes[1, 2].set_ylabel('Evening Power Objective (f2)')
+    axes[1, 2].legend()
+    axes[1, 2].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.show()
+
+    # =====================================================
+    # Create Additional 3D Visualization
+    # =====================================================
+    fig_3d = plt.figure(figsize=(15, 5))
+
+    # 3D Plot 1: Surface-Objective Relationship
+    ax1 = fig_3d.add_subplot(131, projection='3d')
+    scatter_3d1 = ax1.scatter(heights_mean, heights_std, morning_obj,
+                              c=evening_obj, cmap='viridis', alpha=0.7)
+    ax1.set_xlabel('Average Height')
+    ax1.set_ylabel('Height Variation')
+    ax1.set_zlabel('Morning Power Objective')
+    ax1.set_title('3D: Surface vs Morning Power\n(colored by evening power)')
+    fig_3d.colorbar(scatter_3d1, ax=ax1, shrink=0.5)
+
+    # 3D Plot 2: Orientation vs Surface Relationship
+    # Convert orientation to physical angle for visualization
+    orientation_phys = orientation_norm * 2 * np.pi  # Convert to [0, 2π] radians
+    orientation_degrees = orientation_phys * 180 / np.pi  # Convert to degrees
+
+    ax2 = fig_3d.add_subplot(132, projection='3d')
+    scatter_3d2 = ax2.scatter(orientation_degrees, heights_mean, height_range,
+                              c=morning_obj, cmap='plasma', alpha=0.7)
+    ax2.set_xlabel('Building Orientation (degrees)')
+    ax2.set_ylabel('Average Height')
+    ax2.set_zlabel('Height Range')
+    ax2.set_title('3D: Orientation vs Surface\n(colored by morning power)')
+    fig_3d.colorbar(scatter_3d2, ax=ax2, shrink=0.5)
+
+    # 3D Plot 3: Complete Design Space
+    ax3 = fig_3d.add_subplot(133, projection='3d')
+    scatter_3d3 = ax3.scatter(morning_obj, evening_obj, orientation_degrees,
+                              c=heights_mean, cmap='coolwarm', alpha=0.7)
+    ax3.set_xlabel('Morning Power Objective')
+    ax3.set_ylabel('Evening Power Objective')
+    ax3.set_zlabel('Building Orientation (degrees)')
+    ax3.set_title('3D: Objectives vs Orientation\n(colored by avg height)')
+    fig_3d.colorbar(scatter_3d3, ax=ax3, shrink=0.5)
+
+    plt.tight_layout()
+    plt.show()
+
+    # =====================================================
+    # Print Summary Statistics
+    # =====================================================
+    print("\n" + "=" * 50)
+    print("GRIDSHELL LANDSCAPE SUMMARY STATISTICS")
+    print("=" * 50)
+
+    # Convert normalized values to physical units for interpretation
+    heights_physical = heights_mean * 5.0  # Convert to [0, 5] units (physical height)
+    orientation_physical = orientation_norm * 360.0  # Convert to [0, 360] degrees
+
+    print(f"Design Variable Ranges (Physical Units):")
+    print(f"  Average Interior Height: {heights_physical.min():.2f} - {heights_physical.max():.2f} units")
+    print(f"  Height Variation (Std): {heights_std.min():.3f} - {heights_std.max():.3f}")
+    print(f"  Height Range: {height_range.min():.3f} - {height_range.max():.3f}")
+
+    print(f"Context Variable Ranges (Physical Units):")
+    print(f"  Building Orientation: {orientation_physical.min():.1f} - {orientation_physical.max():.1f} degrees")
+
+    print(f"\nObjective Statistics:")
+    print(f"  Morning Power Objective (f1): {morning_obj.min():.6f} - {morning_obj.max():.6f}")
+    print(f"  Evening Power Objective (f2): {evening_obj.min():.6f} - {evening_obj.max():.6f}")
+    print(
+        f"  Objective Span: f1 = {morning_obj.max() - morning_obj.min():.6f}, f2 = {evening_obj.max() - evening_obj.min():.6f}")
+
+    # Find best and worst solutions
+    best_morning_idx = np.argmin(morning_obj)
+    best_evening_idx = np.argmin(evening_obj)
+    best_balanced_idx = np.argmin(morning_obj + evening_obj)
+
+    print(f"\nBest Morning Power Solution:")
+    print(f"  Morning: {morning_obj[best_morning_idx]:.6f}, Evening: {evening_obj[best_morning_idx]:.6f}")
+    print(f"  Avg Height: {heights_physical[best_morning_idx]:.2f}, Height Std: {heights_std[best_morning_idx]:.3f}")
+    print(f"  Orientation: {orientation_physical[best_morning_idx]:.1f}°")
+
+    print(f"\nBest Evening Power Solution:")
+    print(f"  Morning: {morning_obj[best_evening_idx]:.6f}, Evening: {evening_obj[best_evening_idx]:.6f}")
+    print(f"  Avg Height: {heights_physical[best_evening_idx]:.2f}, Height Std: {heights_std[best_evening_idx]:.3f}")
+    print(f"  Orientation: {orientation_physical[best_evening_idx]:.1f}°")
+
+    print(f"\nBest Balanced Solution:")
+    print(f"  Morning: {morning_obj[best_balanced_idx]:.6f}, Evening: {evening_obj[best_balanced_idx]:.6f}")
+    print(f"  Avg Height: {heights_physical[best_balanced_idx]:.2f}, Height Std: {heights_std[best_balanced_idx]:.3f}")
+    print(f"  Orientation: {orientation_physical[best_balanced_idx]:.1f}°")
+
+    # =====================================================
+    # Context Sensitivity Analysis
+    # =====================================================
+    print("\n" + "=" * 50)
+    print("CONTEXT SENSITIVITY ANALYSIS")
+    print("=" * 50)
+
+    # Analyze correlation between context/design and objectives
+    orientation_morning_corr, _ = pearsonr(orientation_norm, morning_obj)
+    orientation_evening_corr, _ = pearsonr(orientation_norm, evening_obj)
+    height_mean_morning_corr, _ = pearsonr(heights_mean, morning_obj)
+    height_mean_evening_corr, _ = pearsonr(heights_mean, evening_obj)
+    height_std_morning_corr, _ = pearsonr(heights_std, morning_obj)
+    height_std_evening_corr, _ = pearsonr(heights_std, evening_obj)
+    height_range_morning_corr, _ = pearsonr(height_range, morning_obj)
+    height_range_evening_corr, _ = pearsonr(height_range, evening_obj)
+
+    print(f"Correlation Analysis:")
+    print(f"  Orientation vs Morning Power: {orientation_morning_corr:.3f}")
+    print(f"  Orientation vs Evening Power: {orientation_evening_corr:.3f}")
+    print(f"  Average Height vs Morning Power: {height_mean_morning_corr:.3f}")
+    print(f"  Average Height vs Evening Power: {height_mean_evening_corr:.3f}")
+    print(f"  Height Variation vs Morning Power: {height_std_morning_corr:.3f}")
+    print(f"  Height Variation vs Evening Power: {height_std_evening_corr:.3f}")
+    print(f"  Height Range vs Morning Power: {height_range_morning_corr:.3f}")
+    print(f"  Height Range vs Evening Power: {height_range_evening_corr:.3f}")
+
+    # Identify design regions for best performance
+    # Low morning power (good morning performance)
+    low_morning_mask = morning_obj < np.percentile(morning_obj, 25)
+    print(f"\nBest Morning Power Performance Regions:")
+    print(
+        f"  Preferred Avg Height: {heights_mean[low_morning_mask].mean():.3f} ± {heights_mean[low_morning_mask].std():.3f}")
+    print(
+        f"  Preferred Height Std: {heights_std[low_morning_mask].mean():.3f} ± {heights_std[low_morning_mask].std():.3f}")
+    print(
+        f"  Preferred Orientation: {orientation_norm[low_morning_mask].mean():.3f} ± {orientation_norm[low_morning_mask].std():.3f}")
+
+    # Low evening power (good evening performance)
+    low_evening_mask = evening_obj < np.percentile(evening_obj, 25)
+    print(f"\nBest Evening Power Performance Regions:")
+    print(
+        f"  Preferred Avg Height: {heights_mean[low_evening_mask].mean():.3f} ± {heights_mean[low_evening_mask].std():.3f}")
+    print(
+        f"  Preferred Height Std: {heights_std[low_evening_mask].mean():.3f} ± {heights_std[low_evening_mask].std():.3f}")
+    print(
+        f"  Preferred Orientation: {orientation_norm[low_evening_mask].mean():.3f} ± {orientation_norm[low_evening_mask].std():.3f}")
+
+    # Analyze trade-offs
+    objective_correlation, _ = pearsonr(morning_obj, evening_obj)
+    print(f"\nObjective Trade-off Analysis:")
+    print(f"  Morning vs Evening Power Correlation: {objective_correlation:.3f}")
+    if objective_correlation > 0.5:
+        print("  → Strong positive correlation: Objectives are conflicting")
+    elif objective_correlation < -0.5:
+        print("  → Strong negative correlation: Objectives are aligned")
+    else:
+        print("  → Weak correlation: Complex trade-off structure")
+
+    # Empirical Nadir Point Determination
+    nadir_point = [morning_obj.max(), evening_obj.max()]
+    print(f"\nEmpirical Nadir Point:")
+    print(f"  Nadir: [{nadir_point[0]:.6f}, {nadir_point[1]:.6f}]")
+    print("  (Worst-case values for minimization objectives)")
+
+    return fig, axes, fig_3d, X_gridshell, Y_gridshell
+
+
+# Example usage
 if __name__ == "__main__":
-    # Make sure the ContextualMultiObjectiveFunction class is loaded
-    fig_2d, fig_3d, X, Y = visualize_magnetic_sifter_landscape_simplified()
+    # Import your gridshell class here
+    # from your_gridshell_module import ContextualMultiObjectiveFunction
+
+    # Run the comprehensive landscape visualization
+    fig, axes, fig_3d, X_samples, Y_objectives = visualize_gridshell_landscape()
+
+    print("\n✅ Gridshell landscape analysis completed!")
+    print("Generated comprehensive visualizations showing:")
+    print("- Objective space structure (morning vs evening power)")
+    print("- Surface design characteristics (height patterns)")
+    print("- Building orientation sensitivity")
+    print("- Pareto front analysis by context")
+    print("- 3D design space relationships")
+    print("- Statistical correlation analysis")

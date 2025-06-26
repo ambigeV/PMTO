@@ -24,6 +24,7 @@ import os
 
 
 IF_PLOT = False
+IF_LOG = False
 IF_GLOBAL = True
 SCALAR = "HV"
 NOISE = False
@@ -893,11 +894,12 @@ class MultiObjectiveBayesianOptimization:
     ) -> Tuple[torch.Tensor, torch.Tensor]:
 
         self.base_beta = beta
-        self.monitor = GPMonitor(dir_name="{}_{}_{}_{}_context_{}".format("MOBO",
-                                                            self.input_dim,
-                                                            self.output_dim,
-                                                            self.model_type,
-                                                            self.mobo_id))
+        if IF_LOG:
+            self.monitor = GPMonitor(dir_name="{}_{}_{}_{}_context_{}".format("MOBO",
+                                                                self.input_dim,
+                                                                self.output_dim,
+                                                                self.model_type,
+                                                                self.mobo_id))
         # Initialize Y_train for all objectives [n_initial, output_dim]
         # Y_train = self._evaluate_objectives(X_train)
 
@@ -906,8 +908,9 @@ class MultiObjectiveBayesianOptimization:
         if NOISE:
             Y_train_noise = Y_train + 0.01 * torch.randn_like(Y_train)
 
-        log_sampled_points = self._sample_points(10000, self.input_dim, 0)
-        Y_sampled_points = self._evaluate_objectives(log_sampled_points)
+        if IF_LOG:
+            log_sampled_points = self._sample_points(10000, self.input_dim, 0)
+            Y_sampled_points = self._evaluate_objectives(log_sampled_points)
 
         for iteration in range(n_iter):
             self._update_beta(iteration)
@@ -984,28 +987,30 @@ class MultiObjectiveBayesianOptimization:
                 bo_model.model = model
                 predictions.append(bo_model)
 
-                # Log GP model parameters
-                self.monitor.log_kernel_params(model, i+1, iteration)
-                # Compute Norm Points
-                norm_log_sampled_points = (log_sampled_points - self.bo_models[0].x_mean) / self.bo_models[0].x_std
-                Y_norm_points = (Y_sampled_points[:, i] - self.bo_models[i].y_mean) / self.bo_models[i].y_std
-                # Log predictions for a sample of points
-                self.monitor.log_predictions(model,
-                                             bo_model.likelihood,
-                                             norm_log_sampled_points,
-                                             Y_norm_points,
-                                             iteration,
-                                             i+1)
+                if IF_LOG:
+                    # Log GP model parameters
+                    self.monitor.log_kernel_params(model, i+1, iteration)
+                    # Compute Norm Points
+                    norm_log_sampled_points = (log_sampled_points - self.bo_models[0].x_mean) / self.bo_models[0].x_std
+                    Y_norm_points = (Y_sampled_points[:, i] - self.bo_models[i].y_mean) / self.bo_models[i].y_std
+                    # Log predictions for a sample of points
+                    self.monitor.log_predictions(model,
+                                                 bo_model.likelihood,
+                                                 norm_log_sampled_points,
+                                                 Y_norm_points,
+                                                 iteration,
+                                                 i+1)
 
             if NOISE:
                 self._update_and_normalize_reference_points(Y_train_noise)
             else:
                 self._update_and_normalize_reference_points(Y_train)
 
-            # Log acquisition function values
-            norm_log_sampled_points = (log_sampled_points - self.bo_models[0].x_mean) / self.bo_models[0].x_std
-            acq_values = self._compute_acquisition_batch(predictions, norm_log_sampled_points, beta, weights)
-            self.monitor.log_acquisition_values(acq_values, iteration)
+            if IF_LOG:
+                # Log acquisition function values
+                norm_log_sampled_points = (log_sampled_points - self.bo_models[0].x_mean) / self.bo_models[0].x_std
+                acq_values = self._compute_acquisition_batch(predictions, norm_log_sampled_points, beta, weights)
+                self.monitor.log_acquisition_values(acq_values, iteration)
 
             if SCALAR == "AT":
                 self.scalarization = AugmentedTchebycheff(
@@ -1044,17 +1049,19 @@ class MultiObjectiveBayesianOptimization:
             self._update_pareto_front(X_train, Y_train)
             self.model_list = predictions
 
-            # Log optimization metrics
-            metrics = {
-                'hypervolume': self.current_hv,
-                'pareto_points': self.pareto_front
-            }
-            self.monitor.log_optimization_metrics(metrics, iteration)
+            if IF_LOG:
+                # Log optimization metrics
+                metrics = {
+                    'hypervolume': self.current_hv,
+                    'pareto_points': self.pareto_front
+                }
+                self.monitor.log_optimization_metrics(metrics, iteration)
 
             if iteration % 5 == 0:
                 print(f'Iteration {iteration}/{n_iter}, Best y: {self.current_hv:.3f}')
 
-        self.monitor.close()
+        if IF_LOG:
+            self.monitor.close()
 
         return X_train, Y_train
 
@@ -1674,7 +1681,8 @@ class ParEGO(MultiObjectiveBayesianOptimization):
         4. Optimize EI acquisition function to find next point
         """
         self.base_beta = beta
-        self.monitor = GPMonitor(dir_name=f"ParEGO_{self.input_dim}_{self.output_dim}_{self.model_type}_{self.mobo_id}")
+        if IF_LOG:
+            self.monitor = GPMonitor(dir_name=f"ParEGO_{self.input_dim}_{self.output_dim}_{self.model_type}_{self.mobo_id}")
 
         # Initialize best scalarized value for EI
         self.best_scalarized_value = float('inf')
@@ -1693,8 +1701,9 @@ class ParEGO(MultiObjectiveBayesianOptimization):
             optimizer_type=self.optimizer_type
         )
 
-        log_sampled_points = self._sample_points(10000, self.input_dim, 0)
-        Y_sampled_points = self._evaluate_objectives(log_sampled_points)
+        if IF_LOG:
+            log_sampled_points = self._sample_points(10000, self.input_dim, 0)
+            Y_sampled_points = self._evaluate_objectives(log_sampled_points)
 
         for iteration in range(n_iter):
             # Generate new random weights for this iteration (ParEGO approach)
@@ -1751,21 +1760,22 @@ class ParEGO(MultiObjectiveBayesianOptimization):
 
             self.single_model.model = model
 
-            # Log GP model parameters
-            self.monitor.log_kernel_params(model, 0, iteration)
+            if IF_LOG:
+                # Log GP model parameters
+                self.monitor.log_kernel_params(model, 0, iteration)
 
-            # Normalize sample points
-            norm_log_sampled_points = (log_sampled_points - self.single_model.x_mean) / self.single_model.x_std
+                # Normalize sample points
+                norm_log_sampled_points = (log_sampled_points - self.single_model.x_mean) / self.single_model.x_std
 
-            # Optimize acquisition function (EI)
-            acq_values = self._compute_acquisition_batch(
-                self.single_model,
-                norm_log_sampled_points,
-                beta,
-                weights
-            )
+                # Optimize acquisition function (EI)
+                acq_values = self._compute_acquisition_batch(
+                    self.single_model,
+                    norm_log_sampled_points,
+                    beta,
+                    weights
+                )
 
-            self.monitor.log_acquisition_values(acq_values, iteration)
+                self.monitor.log_acquisition_values(acq_values, iteration)
 
             # Optimize acquisition function to find next point
             next_x = optimize_scalarized_acquisition_ei(
@@ -1788,17 +1798,19 @@ class ParEGO(MultiObjectiveBayesianOptimization):
             # Update Pareto front
             self._update_pareto_front(X_train, Y_train)
 
-            # Log optimization metrics
-            metrics = {
-                'hypervolume': self.current_hv,
-                'pareto_points': self.pareto_front
-            }
-            self.monitor.log_optimization_metrics(metrics, iteration)
+            if IF_LOG:
+                # Log optimization metrics
+                metrics = {
+                    'hypervolume': self.current_hv,
+                    'pareto_points': self.pareto_front
+                }
+                self.monitor.log_optimization_metrics(metrics, iteration)
 
             if iteration % 5 == 0:
                 print(f'Iteration {iteration}/{n_iter}, Best HV: {self.current_hv:.3f}')
 
-        self.monitor.close()
+        if IF_LOG:
+            self.monitor.close()
         return X_train, Y_train
 
 
@@ -2011,8 +2023,9 @@ class ContextualMultiObjectiveBayesianOptimization:
         base_dir_name = "CMOBO_{}_{}_{}".format(self.input_dim,
                                                        self.output_dim,
                                                        self.model_type)
-        self.initialize_monitors(n_contexts, base_dir_name)
-        log_sampled_points = self._sample_points(10000, self.input_dim, 0)
+        if IF_LOG:
+            self.initialize_monitors(n_contexts, base_dir_name)
+            log_sampled_points = self._sample_points(10000, self.input_dim, 0)
 
         if NOISE:
             Y_train_noise = Y_train + 0.01 * torch.randn_like(Y_train)
@@ -2113,22 +2126,24 @@ class ContextualMultiObjectiveBayesianOptimization:
 
                     bo_model.model = model
                     predictions.append({"model": model, "likelihood": bo_model.likelihood})
-                    for context_id, context in enumerate(contexts):
-                        cur_monitor = self.monitors[context_id]
-                        cur_monitor.log_kernel_params(model, i + 1, iteration)
-                        temp_log_sampled_points = torch.cat([log_sampled_points,
-                                                             context.unsqueeze(0).expand(log_sampled_points.shape[0], -1)],
-                                                            dim=1)
-                        norm_log_sampled_points = (temp_log_sampled_points - self.bo_models[0].x_mean) / self.bo_models[
-                            0].x_std
-                        Y_sampled_points = self.objective_func.evaluate(temp_log_sampled_points)[:, i]
-                        norm_Y_sampled_points = (Y_sampled_points - self.bo_models[i].y_mean) / self.bo_models[i].y_std
-                        cur_monitor.log_predictions(model,
-                                                    bo_model.likelihood,
-                                                    norm_log_sampled_points,
-                                                    norm_Y_sampled_points,
-                                                    iteration,
-                                                    i + 1)
+
+                    if IF_LOG:
+                        for context_id, context in enumerate(contexts):
+                            cur_monitor = self.monitors[context_id]
+                            cur_monitor.log_kernel_params(model, i + 1, iteration)
+                            temp_log_sampled_points = torch.cat([log_sampled_points,
+                                                                 context.unsqueeze(0).expand(log_sampled_points.shape[0], -1)],
+                                                                dim=1)
+                            norm_log_sampled_points = (temp_log_sampled_points - self.bo_models[0].x_mean) / self.bo_models[
+                                0].x_std
+                            Y_sampled_points = self.objective_func.evaluate(temp_log_sampled_points)[:, i]
+                            norm_Y_sampled_points = (Y_sampled_points - self.bo_models[i].y_mean) / self.bo_models[i].y_std
+                            cur_monitor.log_predictions(model,
+                                                        bo_model.likelihood,
+                                                        norm_log_sampled_points,
+                                                        norm_Y_sampled_points,
+                                                        iteration,
+                                                        i + 1)
 
                 self._update_global_reference_and_nadir_points(Y_train)
 
@@ -2147,16 +2162,17 @@ class ContextualMultiObjectiveBayesianOptimization:
             else:
                 predictions = self.predictions
 
-            for context_id, context in enumerate(contexts):
-                # Log acquisition function values
-                cur_monitor = self.monitors[context_id]
-                temp_log_sampled_points = torch.cat([log_sampled_points,
-                                                     context.unsqueeze(0).expand(log_sampled_points.shape[0], -1)],
-                                                    dim=1)
-                norm_log_sampled_points = (temp_log_sampled_points - self.bo_models[0].x_mean) / self.bo_models[0].x_std
-                acq_values = self._compute_acquisition_batch(predictions, norm_log_sampled_points, self.beta, weights,
-                                                             context)
-                cur_monitor.log_acquisition_values(acq_values, iteration)
+            if IF_LOG:
+                for context_id, context in enumerate(contexts):
+                    # Log acquisition function values
+                    cur_monitor = self.monitors[context_id]
+                    temp_log_sampled_points = torch.cat([log_sampled_points,
+                                                         context.unsqueeze(0).expand(log_sampled_points.shape[0], -1)],
+                                                        dim=1)
+                    norm_log_sampled_points = (temp_log_sampled_points - self.bo_models[0].x_mean) / self.bo_models[0].x_std
+                    acq_values = self._compute_acquisition_batch(predictions, norm_log_sampled_points, self.beta, weights,
+                                                                 context)
+                    cur_monitor.log_acquisition_values(acq_values, iteration)
 
             # Optimize for each context
             next_points = []
@@ -2237,11 +2253,12 @@ class ContextualMultiObjectiveBayesianOptimization:
                     Y_context = Y_train[context_mask]
                     X_context = X_train[context_mask][:, :self.input_dim]
                     self._update_pareto_front_for_context(X_context, Y_context, context)
-                metrics = {
-                    'hypervolume': self.context_hv[context_key][-1],
-                    'pareto_points': self.context_pareto_fronts[context_key][-1]
-                }
-                self.monitors[context_id].log_optimization_metrics(metrics, iteration)
+                if IF_LOG:
+                    metrics = {
+                        'hypervolume': self.context_hv[context_key][-1],
+                        'pareto_points': self.context_pareto_fronts[context_key][-1]
+                    }
+                    self.monitors[context_id].log_optimization_metrics(metrics, iteration)
 
             if iteration % 5 == 0:
                 print(f'Iteration {iteration}/{n_iter}')
@@ -2821,8 +2838,9 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
 
         n_contexts = contexts.shape[0]
         self.base_dir_name = f"VAE_CMOBO_{self.problem_name}_{self.input_dim}_{self.output_dim}_{self.model_type}_{self.vae_training_frequency}_{run}_0.1"
-        self.initialize_monitors(n_contexts, self.base_dir_name)
-        log_sampled_points = self._sample_points(30000, self.input_dim, 0)
+        if IF_LOG:
+            self.initialize_monitors(n_contexts, self.base_dir_name)
+            log_sampled_points = self._sample_points(30000, self.input_dim, 0)
 
         if self.USE_NOISE:
             Y_train_noise = Y_train + 0.01 * torch.randn_like(Y_train)
@@ -2922,23 +2940,24 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
 
                     bo_model.model = model
                     predictions.append({"model": model, "likelihood": bo_model.likelihood})
-                    for context_id, context in enumerate(contexts):
-                        cur_monitor = self.monitors[context_id]
-                        cur_monitor.log_kernel_params(model, i + 1, iteration)
-                        temp_log_sampled_points = torch.cat([log_sampled_points,
-                                                             context.unsqueeze(0).expand(log_sampled_points.shape[0],
-                                                                                         -1)],
-                                                            dim=1)
-                        norm_log_sampled_points = (temp_log_sampled_points - self.bo_models[0].x_mean) / self.bo_models[
-                            0].x_std
-                        Y_sampled_points = self.objective_func.evaluate(temp_log_sampled_points)[:, i]
-                        norm_Y_sampled_points = (Y_sampled_points - self.bo_models[i].y_mean) / self.bo_models[i].y_std
-                        cur_monitor.log_predictions(model,
-                                                    bo_model.likelihood,
-                                                    norm_log_sampled_points,
-                                                    norm_Y_sampled_points,
-                                                    iteration,
-                                                    i + 1)
+                    if IF_LOG:
+                        for context_id, context in enumerate(contexts):
+                            cur_monitor = self.monitors[context_id]
+                            cur_monitor.log_kernel_params(model, i + 1, iteration)
+                            temp_log_sampled_points = torch.cat([log_sampled_points,
+                                                                 context.unsqueeze(0).expand(log_sampled_points.shape[0],
+                                                                                             -1)],
+                                                                dim=1)
+                            norm_log_sampled_points = (temp_log_sampled_points - self.bo_models[0].x_mean) / self.bo_models[
+                                0].x_std
+                            Y_sampled_points = self.objective_func.evaluate(temp_log_sampled_points)[:, i]
+                            norm_Y_sampled_points = (Y_sampled_points - self.bo_models[i].y_mean) / self.bo_models[i].y_std
+                            cur_monitor.log_predictions(model,
+                                                        bo_model.likelihood,
+                                                        norm_log_sampled_points,
+                                                        norm_Y_sampled_points,
+                                                        iteration,
+                                                        i + 1)
 
                 self._update_global_reference_and_nadir_points(Y_train)
 
@@ -2956,16 +2975,17 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
             else:
                 predictions = self.predictions
 
-            for context_id, context in enumerate(contexts):
-                # Log acquisition function values
-                cur_monitor = self.monitors[context_id]
-                temp_log_sampled_points = torch.cat([log_sampled_points,
-                                                     context.unsqueeze(0).expand(log_sampled_points.shape[0], -1)],
-                                                    dim=1)
-                norm_log_sampled_points = (temp_log_sampled_points - self.bo_models[0].x_mean) / self.bo_models[0].x_std
-                acq_values = self._compute_acquisition_batch(predictions, norm_log_sampled_points, self.beta, weights,
-                                                             context)
-                cur_monitor.log_acquisition_values(acq_values, iteration)
+            if IF_LOG:
+                for context_id, context in enumerate(contexts):
+                    # Log acquisition function values
+                    cur_monitor = self.monitors[context_id]
+                    temp_log_sampled_points = torch.cat([log_sampled_points,
+                                                         context.unsqueeze(0).expand(log_sampled_points.shape[0], -1)],
+                                                        dim=1)
+                    norm_log_sampled_points = (temp_log_sampled_points - self.bo_models[0].x_mean) / self.bo_models[0].x_std
+                    acq_values = self._compute_acquisition_batch(predictions, norm_log_sampled_points, self.beta, weights,
+                                                                 context)
+                    cur_monitor.log_acquisition_values(acq_values, iteration)
 
             # Train or update VAE model if it's time
             if iteration % self.vae_training_frequency == 0:
@@ -3100,12 +3120,13 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
                     X_context = X_train[context_mask][:, :self.input_dim]
                     self._update_pareto_front_for_context(X_context, Y_context, context)
 
-                # Log metrics
-                metrics = {
-                    'hypervolume': self.context_hv[context_key][-1],
-                    'pareto_points': len(self.context_pareto_fronts[context_key][-1])
-                }
-                self.monitors[context_id].log_optimization_metrics(metrics, iteration)
+                if IF_LOG:
+                    # Log metrics
+                    metrics = {
+                        'hypervolume': self.context_hv[context_key][-1],
+                        'pareto_points': len(self.context_pareto_fronts[context_key][-1])
+                    }
+                    self.monitors[context_id].log_optimization_metrics(metrics, iteration)
 
             if iteration % 5 == 0:
                 print(f'Iteration {iteration}/{n_iter}')
@@ -3548,8 +3569,9 @@ class DiffusionContextualMOBO(ContextualMultiObjectiveBayesianOptimization):
 
         n_contexts = contexts.shape[0]
         self.base_dir_name = f"Diffusion_CMOBO_{self.problem_name}_{self.input_dim}_{self.output_dim}_{self.model_type}_{self.diffusion_training_frequency}_{run}_0.1"
-        self.initialize_monitors(n_contexts, self.base_dir_name)
-        log_sampled_points = self._sample_points(30000, self.input_dim, 0)
+        if IF_LOG:
+            self.initialize_monitors(n_contexts, self.base_dir_name)
+            log_sampled_points = self._sample_points(30000, self.input_dim, 0)
 
         if self.USE_NOISE:
             Y_train_noise = Y_train + 0.01 * torch.randn_like(Y_train)
@@ -3651,23 +3673,24 @@ class DiffusionContextualMOBO(ContextualMultiObjectiveBayesianOptimization):
                     predictions.append({"model": model, "likelihood": bo_model.likelihood})
 
                     # Log model parameters and predictions
-                    for context_id, context in enumerate(contexts):
-                        cur_monitor = self.monitors[context_id]
-                        cur_monitor.log_kernel_params(model, i + 1, iteration)
-                        temp_log_sampled_points = torch.cat([log_sampled_points,
-                                                             context.unsqueeze(0).expand(log_sampled_points.shape[0],
-                                                                                         -1)],
-                                                            dim=1)
-                        norm_log_sampled_points = (temp_log_sampled_points - self.bo_models[0].x_mean) / self.bo_models[
-                            0].x_std
-                        Y_sampled_points = self.objective_func.evaluate(temp_log_sampled_points)[:, i]
-                        norm_Y_sampled_points = (Y_sampled_points - self.bo_models[i].y_mean) / self.bo_models[i].y_std
-                        cur_monitor.log_predictions(model,
-                                                    bo_model.likelihood,
-                                                    norm_log_sampled_points,
-                                                    norm_Y_sampled_points,
-                                                    iteration,
-                                                    i + 1)
+                    if IF_LOG:
+                        for context_id, context in enumerate(contexts):
+                            cur_monitor = self.monitors[context_id]
+                            cur_monitor.log_kernel_params(model, i + 1, iteration)
+                            temp_log_sampled_points = torch.cat([log_sampled_points,
+                                                                 context.unsqueeze(0).expand(log_sampled_points.shape[0],
+                                                                                             -1)],
+                                                                dim=1)
+                            norm_log_sampled_points = (temp_log_sampled_points - self.bo_models[0].x_mean) / self.bo_models[
+                                0].x_std
+                            Y_sampled_points = self.objective_func.evaluate(temp_log_sampled_points)[:, i]
+                            norm_Y_sampled_points = (Y_sampled_points - self.bo_models[i].y_mean) / self.bo_models[i].y_std
+                            cur_monitor.log_predictions(model,
+                                                        bo_model.likelihood,
+                                                        norm_log_sampled_points,
+                                                        norm_Y_sampled_points,
+                                                        iteration,
+                                                        i + 1)
 
                 self._update_global_reference_and_nadir_points(Y_train)
 
@@ -3687,14 +3710,15 @@ class DiffusionContextualMOBO(ContextualMultiObjectiveBayesianOptimization):
 
             # Log acquisition function values
             for context_id, context in enumerate(contexts):
-                cur_monitor = self.monitors[context_id]
-                temp_log_sampled_points = torch.cat([log_sampled_points,
-                                                     context.unsqueeze(0).expand(log_sampled_points.shape[0], -1)],
-                                                    dim=1)
-                norm_log_sampled_points = (temp_log_sampled_points - self.bo_models[0].x_mean) / self.bo_models[0].x_std
-                acq_values = self._compute_acquisition_batch(predictions, norm_log_sampled_points, self.beta, weights,
-                                                             context)
-                cur_monitor.log_acquisition_values(acq_values, iteration)
+                if IF_LOG:
+                    cur_monitor = self.monitors[context_id]
+                    temp_log_sampled_points = torch.cat([log_sampled_points,
+                                                         context.unsqueeze(0).expand(log_sampled_points.shape[0], -1)],
+                                                        dim=1)
+                    norm_log_sampled_points = (temp_log_sampled_points - self.bo_models[0].x_mean) / self.bo_models[0].x_std
+                    acq_values = self._compute_acquisition_batch(predictions, norm_log_sampled_points, self.beta, weights,
+                                                                 context)
+                    cur_monitor.log_acquisition_values(acq_values, iteration)
 
             # Train or update Diffusion model if it's time
             if iteration % self.diffusion_training_frequency == 0:
@@ -3823,11 +3847,12 @@ class DiffusionContextualMOBO(ContextualMultiObjectiveBayesianOptimization):
                     self._update_pareto_front_for_context(X_context, Y_context, context)
 
                 # Log metrics
-                metrics = {
-                    'hypervolume': self.context_hv[context_key][-1],
-                    'pareto_points': len(self.context_pareto_fronts[context_key][-1])
-                }
-                self.monitors[context_id].log_optimization_metrics(metrics, iteration)
+                if IF_LOG:
+                    metrics = {
+                        'hypervolume': self.context_hv[context_key][-1],
+                        'pareto_points': len(self.context_pareto_fronts[context_key][-1])
+                    }
+                    self.monitors[context_id].log_optimization_metrics(metrics, iteration)
 
             if iteration % 5 == 0:
                 print(f'Iteration {iteration}/{n_iter}')
