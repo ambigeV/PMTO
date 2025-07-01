@@ -505,7 +505,7 @@ class ParetoDDIMTrainer:
 
         return self.logs
 
-    def generate_solutions(self, contexts=None, num_samples=10):
+    def generate_solutions(self, contexts=None, num_samples=10, eta=0.0):
         """
         Generate new Pareto set solutions.
 
@@ -533,7 +533,8 @@ class ParetoDDIMTrainer:
                 generated_x = self.model.ddim_sample(
                     shape=shape,
                     c=contexts,
-                    num_steps=self.num_sampling_steps
+                    num_steps=self.num_sampling_steps,
+                    eta=eta
                 )
             else:
                 shape = (num_samples, self.input_dim)
@@ -542,7 +543,8 @@ class ParetoDDIMTrainer:
                 generated_x = self.model.ddim_sample(
                     shape=shape,
                     c=dummy_context,
-                    num_steps=self.num_sampling_steps
+                    num_steps=self.num_sampling_steps,
+                    eta=eta
                 )
 
         return generated_x.cpu().numpy()

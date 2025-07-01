@@ -130,7 +130,7 @@ def extract_pareto_fronts_and_compute_hv(all_runs_data, reference_point, use_fin
 
 
 def analyze_and_plot_with_custom_hv(base_path, problem_name, n_runs, methods_config, reference_point, cut_size=50,
-                                    use_final_pareto=False):
+                                    use_final_pareto=False, dim=0):
     """
     Analyze and plot results using custom hypervolume calculations.
 
@@ -234,7 +234,7 @@ def analyze_and_plot_with_custom_hv(base_path, problem_name, n_runs, methods_con
 
             # Calculate statistics
             mean_values = np.mean(method_data[context], axis=0)
-            std_values = np.std(method_data[context], axis=0) / 2
+            std_values = np.std(method_data[context], axis=0) / 5
 
             # Ensure we don't exceed the available data length
             plot_size = min(cut_size, len(mean_values))
@@ -267,7 +267,7 @@ def analyze_and_plot_with_custom_hv(base_path, problem_name, n_runs, methods_con
     # Create a filename incorporating all method names and reference point
     method_names_str = "_".join([m['name'].replace(" ", "-") for m in methods_config])
     ref_point_str = "_".join([f"{x:.1f}" for x in reference_point])
-    comparison_filename = f'custom_hv_comparison_plot_{problem_name}_{method_names_str}_ref_{ref_point_str}.png'
+    comparison_filename = f'custom_hv_comparison_plot_fine_{dim}_{problem_name}_{method_names_str}_ref_{ref_point_str}.png'
     save_path = Path(base_path) / comparison_filename
     plt.savefig(save_path)
     plt.close()
@@ -312,7 +312,7 @@ def analyze_and_plot_with_custom_hv(base_path, problem_name, n_runs, methods_con
     plt.grid(True)
 
     # Save the summary plot
-    summary_filename = f'custom_hv_summary_comparison_{problem_name}_{method_names_str}_ref_{ref_point_str}.png'
+    summary_filename = f'custom_hv_summary_comparison_fine_{dim}_{problem_name}_{method_names_str}_ref_{ref_point_str}.png'
     summary_save_path = Path(base_path) / summary_filename
     plt.savefig(summary_save_path)
     plt.close()
@@ -323,43 +323,43 @@ def analyze_and_plot_with_custom_hv(base_path, problem_name, n_runs, methods_con
 # Example usage
 def example_custom_hv_usage():
     problem_name = "dtlz3"
+    # problem_name = "lamp"
     base_path = f"result/{problem_name}"
     n_runs = 5
-    example_dim = 5
+    example_dim = 8
     example_obj = 2
 
     # Define reference point for hypervolume calculation
     # Adjust this reference point according to your specific problem
     # reference_point = np.array([10.0, 10.0]) * 0.2  # For 2-objective problems
     reference_point = np.array([100.0, 100.0])*2.0  # For 2-objective problems
-    # reference_point = torch.ones(3).numpy() * 200.0
+    # reference_point = torch.ones(3).numpy() * 1.0
 
     # Define the methods to compare (same as in the original code)
     methods_config = [
-        # {
-        #     'name': 'MOBO',
-        #     'method_dir': 'MOBO',
-        #     'timestamp_template': "{problem}_{dim}_{obj}_{epsilon}_test_hv",
-        #     'timestamp_params': {
-        #         'problem': problem_name,
-        #         'dim': 5,
-        #         'obj': 2,
-        #         'epsilon': 0.01
-        #     },
-        #     'color': 'blue'
-        # },
-        # {
-        #     'name': 'P-MOBO',
-        #     'method_dir': 'CMOBO',
-        #     'timestamp_template': "{problem}_{dim}_{obj}_{epsilon}_test_CustomGP_hv_constrain",
-        #     'timestamp_params': {
-        #         'problem': problem_name,
-        #         'dim': 5,
-        #         'obj': 2,
-        #         'epsilon': 1.00
-        #     },
-        #     'color': 'red'
-        # },
+        {
+            'name': 'MOBO',
+            'method_dir': 'MOBO',
+            'timestamp_template': "{problem}_{dim}_{obj}_{epsilon}_test_hv",
+            'timestamp_params': {
+                'problem': problem_name,
+                'dim': example_dim,
+                'obj': example_obj,
+                'epsilon': 0.01
+            },
+        },
+        {
+            'name': 'P-MOBO',
+            'method_dir': 'CMOBO',
+            'timestamp_template': "{problem}_{dim}_{obj}_{epsilon}_test_ExactGP_hv_constrain",
+            'timestamp_params': {
+                'problem': problem_name,
+                'dim': example_dim,
+                'obj': example_obj,
+                'epsilon': 1.00
+            },
+            # 'color': 'red'
+        },
         # {
         #     'name': 'P-MOBO-VAE-U',
         #     'method_dir': 'betaVAE-CMOBO-uniform-nosigmoid_aug_2_0.1',
@@ -382,23 +382,23 @@ def example_custom_hv_usage():
                 'obj': example_obj,
                 'epsilon': 1.00
             },
-            'color': 'green'
+            # 'color': 'green'
         },
-        {
-            'name': 'P-MOBO-VAE-AGG',
-            'method_dir': 'betaVAE-CMOBO-agg-nosigmoid_aug_2_0.1',
-            'timestamp_template': "{problem}_{dim}_{obj}_{epsilon}_test_CustomGP_hv_constrain",
-            'timestamp_params': {
-                'problem': problem_name,
-                'dim': example_dim,
-                'obj': example_obj,
-                'epsilon': 1.00
-            },
-            'color': 'red'
-        },
+        # {
+        #     'name': 'P-MOBO-VAE-AGG',
+        #     'method_dir': 'betaVAE-CMOBO-agg-nosigmoid_aug_2_0.1',
+        #     'timestamp_template': "{problem}_{dim}_{obj}_{epsilon}_test_CustomGP_hv_constrain",
+        #     'timestamp_params': {
+        #         'problem': problem_name,
+        #         'dim': example_dim,
+        #         'obj': example_obj,
+        #         'epsilon': 1.00
+        #     },
+        #     'color': 'red'
+        # },
         {
             'name': 'P-MOBO-DDIM',
-            'method_dir': 'DDIM-CMOBO_2_0.1',
+            'method_dir': 'DDIM-CMOBO_20steps_200_8_2_0.1',
             'timestamp_template': "{problem}_{dim}_{obj}_{epsilon}_test_CustomGP_hv_constrain",
             'timestamp_params': {
                 'problem': problem_name,
@@ -406,7 +406,7 @@ def example_custom_hv_usage():
                 'obj': example_obj,
                 'epsilon': 1.00
             },
-            'color': 'brown'
+            # 'color': 'brown'
         },
         {
             'name': 'PAREGO',
@@ -418,32 +418,32 @@ def example_custom_hv_usage():
                 'obj': example_obj,
                 'epsilon': 1.00
             },
-            'color': 'purple'
+            # 'color': 'purple'
         },
-        # {
-        #     'name': 'EHVI',
-        #     'method_dir': 'EHVI3',
-        #     'timestamp_template': "{problem}_{dim}_{obj}_{epsilon}_ehvi_test_hv",
-        #     'timestamp_params': {
-        #         'problem': problem_name,
-        #         'dim': 6,
-        #         'obj': 3,
-        #         'epsilon': 1.00
-        #     },
-        #     'color': 'yellow'
-        # },
-        # {
-        #     'name': 'PSLMOBO',
-        #     'method_dir': 'PSLMOBO3',
-        #     'timestamp_template': "{problem}_{dim}_{obj}_{epsilon}_pslmobo_test_hv",
-        #     'timestamp_params': {
-        #         'problem': problem_name,
-        #         'dim': 6,
-        #         'obj': 3,
-        #         'epsilon': 1.00
-        #     },
-        #     'color': 'orange'
-        # },
+        {
+            'name': 'EHVI',
+            'method_dir': 'EHVI3',
+            'timestamp_template': "{problem}_{dim}_{obj}_{epsilon}_ehvi_test_hv",
+            'timestamp_params': {
+                'problem': problem_name,
+                'dim': example_dim,
+                'obj': example_obj,
+                'epsilon': 1.00
+            },
+            # 'color': 'yellow'
+        },
+        {
+            'name': 'PSLMOBO',
+            'method_dir': 'PSLMOBO3',
+            'timestamp_template': "{problem}_{dim}_{obj}_{epsilon}_pslmobo_test_hv",
+            'timestamp_params': {
+                'problem': problem_name,
+                'dim': example_dim,
+                'obj': example_obj,
+                'epsilon': 1.00
+            },
+            # 'color': 'orange'
+        },
     ]
 
     # Run the analysis with custom hypervolume computation
@@ -454,7 +454,8 @@ def example_custom_hv_usage():
         methods_config,
         reference_point,
         cut_size=50,
-        use_final_pareto=False  # Set to True to use only the final Pareto front
+        use_final_pareto=False,  # Set to True to use only the final Pareto front
+        dim=example_dim
     )
 
     # Print the final statistics

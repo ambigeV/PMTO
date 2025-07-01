@@ -308,6 +308,18 @@ class BayesianOptimization:
         x_mean, x_std = X.mean(dim=0), X.std(dim=0)
         y_mean, y_std = Y.mean(dim=0), Y.std(dim=0)
 
+        # Handle zero variance explicitly
+        zero_var_x = (x_std == 0)
+        zero_var_y = (y_std == 0)
+
+        if zero_var_x.any():
+            print(f"Warning: {zero_var_x.sum()} input features have zero variance")
+            x_std[zero_var_x] = 1.0  # Don't normalize constant features
+
+        if zero_var_y.any():
+            print(f"Warning: {zero_var_y.sum()} output objectives have zero variance")
+            y_std[zero_var_y] = 1.0  # Don't normalize constant objectives
+
         # Z-score normalization
         X_normalized = (X - x_mean) / x_std
         Y_normalized = (Y - y_mean) / y_std
@@ -3174,6 +3186,7 @@ class DiffusionContextualMOBO(ContextualMultiObjectiveBayesianOptimization):
             # diffusion_hidden_dim: int = 16,
             diffusion_hidden_dim: int = 8,
             diffusion_num_layers: int = 4,
+            diffusion_eta: float = 0.5,
             use_noise: bool = False,
             scalar_type: str = "HV",
             use_global_reference: bool = True,
@@ -3199,6 +3212,7 @@ class DiffusionContextualMOBO(ContextualMultiObjectiveBayesianOptimization):
         self.diffusion_sampling_steps = diffusion_sampling_steps
         self.diffusion_hidden_dim = diffusion_hidden_dim
         self.diffusion_num_layers = diffusion_num_layers
+        self.diffusion_eta = diffusion_eta
         self.diffusion_model = None
         self.problem_name = problem_name
 
@@ -3535,7 +3549,8 @@ class DiffusionContextualMOBO(ContextualMultiObjectiveBayesianOptimization):
         candidates = torch.from_numpy(
             self.diffusion_model.generate_solutions(
                 contexts=context_batch.cpu().numpy(),
-                num_samples=num_samples
+                num_samples=num_samples,
+                eta=self.diffusion_eta
             )
         ).float()
 

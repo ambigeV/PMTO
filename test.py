@@ -33,7 +33,8 @@ def parse_arguments():
     parser = argparse.ArgumentParser(description='Run DTLZ optimization experiments')
     parser.add_argument('--problem', type=str, default='dtlz2',
                        choices=['dtlz1', 'dtlz2', 'dtlz3', 'dtlz4',
-                                'dtlz5', 'dtlz6', 'dtlz7', 'turbine', 'bicopter', 'magnetic_sifter'],
+                                'dtlz5', 'dtlz6', 'dtlz7', 'turbine',
+                                'bicopter', 'magnetic_sifter', 'gridshell', 'lamp'],
                        help='DTLZ problem to optimize (default: dtlz2)')
     parser.add_argument('--n_runs', type=int, default=1,
                        help='Number of optimization runs (default: 1)')
@@ -649,7 +650,7 @@ def diffuse_optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_o
                 print(f"Run {run + 1}, Context {i}: No Pareto front found")
 
         # Save individual run data
-        save_path = f'result/{problem_name}/DDIM-CMOBO_20steps_200_8_2_0.1_optimization_history_{timestamp}_run_{run}.pth'
+        save_path = f'result/{problem_name}/DDIM-CMOBO_20steps_200_8_0.5_2_0.1_optimization_history_{timestamp}_run_{run}.pth'
         torch.save(run_data, save_path)
         print(f"Run {run + 1} data saved to {save_path}")
 
@@ -673,7 +674,7 @@ def diffuse_optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_o
             ax.legend()
 
         plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-        plt.savefig(f'result/{problem_name}/DDIM-CMOBO_20steps_200_8_2_0.1_hypervolume_history_grid_{timestamp}_run_{run}.png')
+        plt.savefig(f'result/{problem_name}/DDIM-CMOBO_20steps_200_8_0.5_2_0.1_hypervolume_history_grid_{timestamp}_run_{run}.png')
         plt.close()
 
 
@@ -1250,6 +1251,18 @@ def main():
 
     if args.method_name == "ALL":
         vae_optimization_loop_test(
+            problem_name=args.problem,
+            n_runs=args.n_runs,
+            n_iter=args.n_iter,
+            n_objectives=args.n_objectives,
+            n_variables=args.n_variables,
+            temp_beta=args.beta,
+            model_type=args.model_type,
+            m_tasks=args.m_tasks,
+            m_samples=args.m_samples,
+        )
+
+        diffuse_optimization_loop_test(
             problem_name=args.problem,
             n_runs=args.n_runs,
             n_iter=args.n_iter,

@@ -82,7 +82,7 @@ if __name__ == "__main__":
     # Configuration
     N_CONTEXTS = 8  # Number of contexts
     INPUT_DIM = 3  # 3D input space
-    N_POINTS = 20  # 20 points per context
+    N_POINTS = 5  # 20 points per context
 
     # Generate and save points
     generate_and_save_initial_points(
