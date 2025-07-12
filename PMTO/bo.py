@@ -2308,7 +2308,8 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
             use_noise: bool = False,
             scalar_type: str = "HV",
             use_global_reference: bool = True,
-            problem_name: str = None
+            problem_name: str = None,
+            true_conditional: bool = False  # True-cVAE: new parameter
     ):
         # Initialize the parent class
         super().__init__(
@@ -2343,6 +2344,9 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
         # Store all the available training data so far
         self.X_train = None
         self.Y_train = None
+
+        # True-cVAE: Store the parameter
+        self.true_conditional = true_conditional
 
     def _generate_uniform_weights(self, num_uniform_weights: int, output_dim: int) -> torch.Tensor:
         """
@@ -2649,6 +2653,7 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
                 latent_dim=self.vae_latent_dim,
                 context_dim=contexts_train.shape[1],  # Context + weights
                 conditional=True,
+                true_conditional=self.true_conditional,  # True-cVAE: pass the parameter
                 epochs=self.vae_epochs,
                 batch_size=min(self.vae_batch_size, len(X_train)),
                 trainer_id=f"CMOBO_VAE_{iteration}",
@@ -2681,8 +2686,10 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
                         c = None
                         recon_x, mean, log_var, z = vae_model.model(x)
 
+                    # True-cVAE: Pass context to loss function
+                    loss, mse, kld = vae_model.loss_fn(recon_x, x, mean, log_var, c)
                     # Calculate loss
-                    loss, mse, kld = vae_model.loss_fn(recon_x, x, mean, log_var)
+                    # loss, mse, kld = vae_model.loss_fn(recon_x, x, mean, log_var)
 
                     # Backward pass
                     vae_model.optimizer.zero_grad()
@@ -2811,8 +2818,18 @@ class VAEEnhancedCMOBO(ContextualMultiObjectiveBayesianOptimization):
         combined_context = torch.cat([context[1:], weight_vector])
 
         # Sample latent vectors directly
-        latent_dim = self.vae_model.latent_dim
-        z_samples = torch.randn(num_samples, latent_dim).to(self.vae_model.device)
+        # latent_dim = self.vae_model.latent_dim
+        # z_samples = torch.randn(num_samples, latent_dim).to(self.vae_model.device)
+
+        # True-cVAE: Use conditional prior if enabled, otherwise standard prior
+        if self.true_conditional:
+            # Create batch of contexts for conditional sampling
+            context_batch = combined_context.unsqueeze(0).expand(num_samples, -1)
+            z_samples = self.vae_model.model.sample_from_conditional_prior(context_batch, num_samples=1)
+        else:
+            # Original sampling from standard prior
+            latent_dim = self.vae_model.latent_dim
+            z_samples = torch.randn(num_samples, latent_dim).to(self.vae_model.device)
 
         # Create batch of identical contexts
         context_batch = combined_context.unsqueeze(0).expand(num_samples, -1)
@@ -3176,15 +3193,15 @@ class DiffusionContextualMOBO(ContextualMultiObjectiveBayesianOptimization):
             optimizer_type: str = 'adam',
             rho: float = 0.001,
             # Diffusion-specific parameters
-            diffusion_training_frequency: int = 2,
+            diffusion_training_frequency: int = 3,
             diffusion_min_data_points: int = 8,
             # diffusion_timesteps: int = 1000,
-            diffusion_timesteps: int = 200,
+            diffusion_timesteps: int = 100,
             diffusion_epochs: int = 100,
             diffusion_batch_size: int = 32,
             diffusion_sampling_steps: int = 20,
-            # diffusion_hidden_dim: int = 16,
-            diffusion_hidden_dim: int = 8,
+            diffusion_hidden_dim: int = 16,
+            # diffusion_hidden_dim: int = 8,
             diffusion_num_layers: int = 4,
             diffusion_eta: float = 0.5,
             use_noise: bool = False,
@@ -3342,7 +3359,8 @@ class DiffusionContextualMOBO(ContextualMultiObjectiveBayesianOptimization):
             all_X_context = self.X_train[context_mask][:, :self.input_dim]
             all_Y_context = self.Y_train[context_mask]
             num_uniform_weights = combined_front.shape[0]
-            uniform_weights = self._generate_uniform_weights(num_uniform_weights, self.output_dim)
+            uniform_weights = self._generate_uniform_weights(num_uniform_weights**(self.output_dim - 1),
+                                                             self.output_dim)
 
             # Process uniform weights
             for weight in uniform_weights:

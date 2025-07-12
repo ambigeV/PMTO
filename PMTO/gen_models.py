@@ -8,6 +8,26 @@ from torch.utils.data import DataLoader, TensorDataset
 from collections import defaultdict
 
 
+class ConditionalPrior(torch.nn.Module):
+    """True-cVAE: Learnable conditional prior p(z|c)"""
+
+    def __init__(self, context_size, latent_size, hidden_size=16):
+        super().__init__()
+        self.prior_network = torch.nn.Sequential(
+            torch.nn.Linear(context_size, hidden_size),
+            torch.nn.ReLU(),
+            torch.nn.Linear(hidden_size, 2 * latent_size)  # mean + log_var
+        )
+        self.latent_size = latent_size
+
+    def forward(self, c):
+        """True-cVAE: Get p(z|c) parameters"""
+        params = self.prior_network(c)
+        mean = params[:, :self.latent_size]
+        log_var = torch.clamp(params[:, self.latent_size:], min=-10, max=10)
+        return mean, log_var
+
+
 class VAE(torch.nn.Module):
     """
     Variational Autoencoder for Pareto set/front modeling.
@@ -15,7 +35,7 @@ class VAE(torch.nn.Module):
     """
 
     def __init__(self, encoder_layer_sizes, latent_size, decoder_layer_sizes,
-                 conditional=False, context_size=0):
+                 conditional=False, context_size=0, true_conditional=False):
         super().__init__()
 
         if conditional:
@@ -33,6 +53,13 @@ class VAE(torch.nn.Module):
         self.decoder = Decoder(
             decoder_layer_sizes, latent_size, conditional, context_size)
 
+        # True-cVAE: Add conditional prior
+        self.true_conditional = true_conditional and conditional
+        if self.true_conditional:
+            self.conditional_prior = ConditionalPrior(context_size, latent_size)
+        else:
+            self.conditional_prior = None
+
     def forward(self, x, c=None):
         means, log_var = self.encoder(x, c)
         z = self.reparameterize(means, log_var)
@@ -44,6 +71,23 @@ class VAE(torch.nn.Module):
         std = torch.exp(0.5 * log_var)
         eps = torch.randn_like(std)
         return mu + eps * std
+
+    # 7. Add sampling method to VAE (NEW METHOD)
+    def sample_from_conditional_prior(self, c, num_samples=1):
+        """True-cVAE: Sample from learned p(z|c)"""
+        if self.true_conditional and c is not None:
+            prior_mean, prior_log_var = self.conditional_prior(c)
+            if num_samples > 1:
+                prior_mean = prior_mean.unsqueeze(1).expand(-1, num_samples, -1).reshape(-1, self.latent_size)
+                prior_log_var = prior_log_var.unsqueeze(1).expand(-1, num_samples, -1).reshape(-1, self.latent_size)
+
+            std = torch.exp(0.5 * prior_log_var)
+            eps = torch.randn_like(std)
+            return prior_mean + eps * std
+        else:
+            # Fallback to standard prior
+            batch_size = c.size(0) if c is not None else num_samples
+            return torch.randn(batch_size, self.latent_size, device=next(self.parameters()).device)
 
     def inference(self, z, c=None):
         """
@@ -145,6 +189,7 @@ class ParetoVAETrainer:
                  latent_dim=2,  # Dimension of latent space
                  context_dim=0,  # Dimension of context variables
                  conditional=False,  # Whether to use conditional VAE
+                 true_conditional=False,
                  learning_rate=0.1,
                  batch_size=64,
                  epochs=100,
@@ -206,6 +251,17 @@ class ParetoVAETrainer:
             lr=learning_rate
         )
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate)
+
+        # True-cVAE: Add prior optimizer if needed
+        if true_conditional and conditional:
+            self.true_conditional = True
+            # Add conditional prior parameters to main optimizer
+            self.optimizer = torch.optim.Adam(
+                list(self.model.parameters()) + list(self.model.conditional_prior.parameters()),
+                lr=learning_rate
+            )
+        else:
+            self.true_conditional = False
 
         # Schedulers for all optimizers
         self.encoder_scheduler = torch.optim.lr_scheduler.MultiStepLR(
@@ -513,7 +569,7 @@ class ParetoVAETrainer:
 
         return total_norm, max_norm, min_norm
 
-    def loss_fn(self, recon_x, x, mean, log_var):
+    def loss_fn(self, recon_x, x, mean, log_var, c=None):
         """
         VAE loss function combining reconstruction loss and KL divergence.
 
@@ -530,9 +586,28 @@ class ParetoVAETrainer:
         MSE = torch.nn.functional.mse_loss(
             recon_x, x, reduction='sum')
 
-        # KL divergence
-        KLD = -0.5 * torch.sum(1 + log_var - mean.pow(2) - log_var.exp())
-        beta = 0.001
+        # True-cVAE: Use conditional KL divergence if enabled
+        if self.true_conditional and c is not None:
+            # KL(q(z|x,c) || p(z|c)) instead of KL(q(z|x,c) || p(z))
+            prior_mean, prior_log_var = self.model.conditional_prior(c)
+            posterior_var = torch.exp(log_var)
+            prior_var = torch.exp(prior_log_var)
+
+            KLD = 0.5 * torch.sum(
+                prior_log_var - log_var +
+                (posterior_var + (mean - prior_mean).pow(2)) / prior_var - 1
+            )
+            beta = 1.0
+
+        else:
+            # Original KL divergence
+            KLD = -0.5 * torch.sum(1 + log_var - mean.pow(2) - log_var.exp())
+            beta = 0.001
+
+
+        # # KL divergence
+        # KLD = -0.5 * torch.sum(1 + log_var - mean.pow(2) - log_var.exp())
+        # beta = 0.001
 
         return (MSE + beta * KLD) / x.size(0), MSE / x.size(0), KLD / x.size(0)
 
@@ -673,7 +748,8 @@ class ParetoVAETrainer:
                         recon_x, mean, log_var, z = self.model(x)
 
                     # Calculate loss
-                    loss, mse, kld = self.loss_fn(recon_x, x, mean, log_var)
+                    # loss, mse, kld = self.loss_fn(recon_x, x, mean, log_var)
+                    loss, mse, kld = self.loss_fn(recon_x, x, mean, log_var, c)  # True-cVAE: pass context
 
                     # Backward pass
                     self.optimizer.zero_grad()
@@ -905,8 +981,14 @@ class ParetoVAETrainer:
                 if contexts.size(0) == 1 and num_samples > 1:
                     contexts = contexts.repeat(num_samples, 1)
 
-                num_contexts = contexts.size(0)
-                z = torch.randn(num_contexts, self.latent_dim).to(self.device)
+                # num_contexts = contexts.size(0)
+                # z = torch.randn(num_contexts, self.latent_dim).to(self.device)
+                # True-cVAE: Sample from conditional prior instead of standard prior
+                if self.true_conditional:
+                    z = self.model.sample_from_conditional_prior(contexts, num_samples=1)
+                else:
+                    z = torch.randn(contexts.size(0), self.latent_dim).to(self.device)
+
                 generated_x = self.model.inference(z, c=contexts)
             else:
                 z = torch.randn(num_samples, self.latent_dim).to(self.device)

@@ -506,6 +506,7 @@ def vae_optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objec
         # Initialize the optimizer
         optimizer = VAEEnhancedCMOBO(
             objective_func=obj_func,
+            true_conditional=True,
             model_type=model_type,
             problem_name=problem_name
         )
@@ -546,7 +547,7 @@ def vae_optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objec
                 print(f"Run {run + 1}, Context {i}: No Pareto front found")
 
         # Save individual run data
-        save_path = f'result/{problem_name}/betaVAE-CMOBO-nosigmoid_aug_2_0.1_optimization_history_{timestamp}_run_{run}.pth'
+        save_path = f'result/{problem_name}/betaCVAE-CMOBO-nosigmoid_aug_2_0.1_optimization_history_{timestamp}_run_{run}.pth'
         torch.save(run_data, save_path)
         print(f"Run {run + 1} data saved to {save_path}")
 
@@ -570,7 +571,7 @@ def vae_optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objec
             ax.legend()
 
         plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-        plt.savefig(f'result/{problem_name}/betaVAE-CMOBO-nosigmoid_aug_2_0.1_hypervolume_history_grid_{timestamp}_run_{run}.png')
+        plt.savefig(f'result/{problem_name}/betaCVAE-CMOBO-nosigmoid_aug_2_0.1_hypervolume_history_grid_{timestamp}_run_{run}.png')
         plt.close()
 
 
@@ -650,7 +651,7 @@ def diffuse_optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_o
                 print(f"Run {run + 1}, Context {i}: No Pareto front found")
 
         # Save individual run data
-        save_path = f'result/{problem_name}/DDIM-CMOBO_20steps_200_8_0.5_2_0.1_optimization_history_{timestamp}_run_{run}.pth'
+        save_path = f'result/{problem_name}/DDIM-CMOBO_20steps_100_16_0.5_3_0.1_optimization_history_{timestamp}_run_{run}.pth'
         torch.save(run_data, save_path)
         print(f"Run {run + 1} data saved to {save_path}")
 
@@ -674,7 +675,7 @@ def diffuse_optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_o
             ax.legend()
 
         plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-        plt.savefig(f'result/{problem_name}/DDIM-CMOBO_20steps_200_8_0.5_2_0.1_hypervolume_history_grid_{timestamp}_run_{run}.png')
+        plt.savefig(f'result/{problem_name}/DDIM-CMOBO_20steps_100_16_0.5_3_0.1_hypervolume_history_grid_{timestamp}_run_{run}.png')
         plt.close()
 
 
