@@ -506,7 +506,7 @@ def vae_optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objec
         # Initialize the optimizer
         optimizer = VAEEnhancedCMOBO(
             objective_func=obj_func,
-            true_conditional=True,
+            true_conditional=False,
             model_type=model_type,
             problem_name=problem_name
         )
@@ -546,10 +546,43 @@ def vae_optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objec
             else:
                 print(f"Run {run + 1}, Context {i}: No Pareto front found")
 
+        # ⭐ NEW: Create complete data structure
+        complete_data = {
+            'optimization_history': run_data,  # Original format
+            'training_data': {
+                'X_all': optimizer.X_train.clone(),
+                'Y_all': optimizer.Y_train.clone(),
+                'contexts': contexts.clone()
+            },
+            'trained_vae_model': None,
+            'vae_config': None,
+            'elite_solutions': {
+                'vae_training_sets': optimizer.vae_training_sets,
+                'vae_training_contexts': optimizer.vae_training_contexts
+            }
+        }
+
+        # ⭐ NEW: Save trained VAE model
+        if optimizer.vae_model is not None:
+            complete_data['trained_vae_model'] = optimizer.vae_model.model.state_dict()
+            complete_data['vae_config'] = {
+                'input_dim': optimizer.vae_model.input_dim,
+                'latent_dim': optimizer.vae_model.latent_dim,
+                'context_dim': optimizer.vae_model.context_dim,
+                'conditional': optimizer.vae_model.conditional,
+                'true_conditional': optimizer.vae_model.true_conditional,
+                'architecture': 'VAE'
+            }
+
         # Save individual run data
-        save_path = f'result/{problem_name}/betaCVAE-CMOBO-nosigmoid_aug_2_0.1_optimization_history_{timestamp}_run_{run}.pth'
+        save_path = f'result/{problem_name}/A_betaCVAE-CMOBO-nosigmoid_aug_2_0.1_optimization_history_{timestamp}_run_{run}.pth'
         torch.save(run_data, save_path)
         print(f"Run {run + 1} data saved to {save_path}")
+
+        # ⭐ NEW: Save complete data
+        complete_save_path = f'result/{problem_name}/A_betaCVAE-CMOBO-nosigmoid_aug_2_0.1_complete_{timestamp}_run_{run}.pth'
+        torch.save(complete_data, complete_save_path)
+        print(f"VAE complete data saved to {complete_save_path}")
 
         # Plot hypervolume history for this run
         fig, axes = plt.subplots(4, 4, figsize=(20, 20))
@@ -571,7 +604,7 @@ def vae_optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objec
             ax.legend()
 
         plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-        plt.savefig(f'result/{problem_name}/betaCVAE-CMOBO-nosigmoid_aug_2_0.1_hypervolume_history_grid_{timestamp}_run_{run}.png')
+        plt.savefig(f'result/{problem_name}/A_betaCVAE-CMOBO-nosigmoid_aug_2_0.1_hypervolume_history_grid_{timestamp}_run_{run}.png')
         plt.close()
 
 
@@ -650,10 +683,43 @@ def diffuse_optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_o
             else:
                 print(f"Run {run + 1}, Context {i}: No Pareto front found")
 
+        # ⭐ NEW: Create complete data structure
+        complete_data = {
+            'optimization_history': run_data,  # Original format
+            'training_data': {
+                'X_all': optimizer.X_train.clone(),
+                'Y_all': optimizer.Y_train.clone(),
+                'contexts': contexts.clone()
+            },
+            'trained_ddim_model': None,
+            'ddim_config': None,
+            'elite_solutions': {
+                'diffusion_training_sets': optimizer.diffusion_training_sets,
+                'diffusion_training_contexts': optimizer.diffusion_training_contexts
+            }
+        }
+
+        # ⭐ NEW: Save trained DDIM model
+        if optimizer.diffusion_model is not None:
+            complete_data['trained_ddim_model'] = optimizer.diffusion_model.model.state_dict()
+            complete_data['ddim_config'] = {
+                'input_dim': optimizer.diffusion_model.input_dim,
+                'condition_dim': optimizer.diffusion_model.condition_dim,
+                'timesteps': optimizer.diffusion_model.timesteps,
+                'hidden_dim': optimizer.diffusion_model.hidden_dim,
+                'num_layers': optimizer.diffusion_model.num_layers,
+                'architecture': 'ConditionalDDIM'
+            }
+
         # Save individual run data
-        save_path = f'result/{problem_name}/DDIM-CMOBO_20steps_100_16_0.5_3_0.1_optimization_history_{timestamp}_run_{run}.pth'
+        save_path = f'result/{problem_name}/A_DDIM-CMOBO_20steps_100_16_0.5_3_0.1_optimization_history_{timestamp}_run_{run}.pth'
         torch.save(run_data, save_path)
         print(f"Run {run + 1} data saved to {save_path}")
+
+        # ⭐ NEW: Save complete data
+        complete_save_path = f'result/{problem_name}/A_DDIM-CMOBO_20steps_100_16_0.5_3_0.1_complete_{timestamp}_run_{run}.pth'
+        torch.save(complete_data, complete_save_path)
+        print(f"DDIM complete data saved to {complete_save_path}")
 
         # Plot hypervolume history for this run
         fig, axes = plt.subplots(4, 4, figsize=(20, 20))
@@ -675,7 +741,7 @@ def diffuse_optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_o
             ax.legend()
 
         plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-        plt.savefig(f'result/{problem_name}/DDIM-CMOBO_20steps_100_16_0.5_3_0.1_hypervolume_history_grid_{timestamp}_run_{run}.png')
+        plt.savefig(f'result/{problem_name}/A_DDIM-CMOBO_20steps_100_16_0.5_3_0.1_hypervolume_history_grid_{timestamp}_run_{run}.png')
         plt.close()
 
 
@@ -1055,6 +1121,13 @@ def run_pslmobo_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2,
         print(f"Starting PSL-MOBO run {run + 1}/{n_runs}")
 
         run_data = {}
+        # ✅ FIXED: Only initialize structure
+        complete_data = {
+            'training_data': {},
+            'trained_models': {},
+            'model_configs': {},
+            'contexts': contexts.clone()
+        }
         for context_idx, context in enumerate(contexts):
             print(f" Optimizing for context {context_idx + 1}/{len(contexts)}")
 
@@ -1102,10 +1175,31 @@ def run_pslmobo_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2,
                 'hv_history': pslmobo.hv_history,
             }
 
+            # ✅ FIXED: Correct PSL-MOBO data saving
+            complete_data['training_data'][context_key] = {
+                'X_all': X_opt.clone(),  # ✅ No context slicing needed
+                'Y_all': Y_opt.clone(),  # ✅ Direct assignment
+                'context': context.clone()
+            }
+
+            # ✅ FIXED: Save trained model per context
+            complete_data['trained_models'][context_key] = pslmobo.psmodel.state_dict()
+            complete_data['model_configs'][context_key] = {
+                'input_dim': pslmobo.input_dim,
+                'output_dim': pslmobo.output_dim,
+                'architecture': 'ParetoSetModel'
+            }
+
+
         # Save individual run data
-        save_path = f'result/{problem_name}/PSLMOBO3_optimization_history_{timestamp}_run_{run}.pth'
+        save_path = f'result/{problem_name}/A_PSLMOBO3_optimization_history_{timestamp}_run_{run}.pth'
         torch.save(run_data, save_path)
         print(f"PSL-MOBO run {run} data saved to {save_path}")
+
+        # ⭐ NEW: Save complete data
+        complete_save_path = f'result/{problem_name}/A_PSLMOBO3_complete_{timestamp}_run_{run}.pth'
+        torch.save(complete_data, complete_save_path)
+        print(f"PSL-MOBO complete data saved to {complete_save_path}")
 
         # Plot results for this run
         fig, axes = plt.subplots(2, 4, figsize=(20, 20))
@@ -1126,8 +1220,205 @@ def run_pslmobo_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2,
             ax.legend()
 
         plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-        plt.savefig(f'result/{problem_name}/PSLMOBO3_hypervolume_history_grid_{timestamp}_run_{run}.png')
+        plt.savefig(f'result/{problem_name}/A_PSLMOBO3_hypervolume_history_grid_{timestamp}_run_{run}.png')
         plt.close()
+
+
+def simple_ddpm_optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5, n_objectives=2,
+                                       n_variables=5, temp_beta=1.0, model_type="ExactGP", m_tasks=8, m_samples=20):
+    """
+    Test function for the simplified DDPM-based contextual multi-objective Bayesian optimization.
+
+    Args:
+        problem_name: Name of the optimization problem (e.g., 'dtlz2')
+        n_runs: Number of independent runs
+        n_iter: Number of optimization iterations
+        n_objectives: Number of objectives
+        n_variables: Number of decision variables
+        temp_beta: Beta parameter for acquisition function
+        model_type: Type of GP model ("ExactGP" or "SVGP")
+        m_tasks: Number of different contexts
+        m_samples: Number of initial samples per context
+    """
+
+    # Initialize the objective function
+    obj_func = ContextualMultiObjectiveFunction(func_name=problem_name,
+                                                n_objectives=n_objectives,
+                                                n_variables=n_variables)
+
+    # Update directory
+    directory_path = f'result/{problem_name}'
+    if not os.path.exists(directory_path):
+        os.makedirs(directory_path)
+
+    # Set up fixed contexts using LHS
+    n_contexts = m_tasks
+    contexts_file = 'data/context_{}_{}.pth'.format(n_contexts, obj_func.context_dim)
+
+    if os.path.exists(contexts_file):
+        contexts = torch.load(contexts_file)
+    else:
+        contexts = generate_and_save_contexts(n_contexts, obj_func.context_dim, contexts_file)
+
+    # Plot the contexts
+    plot_contexts(contexts)
+
+    # Create timestamp for saving results
+    timestamp = "{}_{}_{}_{:.2f}_simple_ddpm_{}_hv_constrain".format(
+        problem_name,
+        n_variables,
+        n_objectives,
+        temp_beta,
+        model_type
+    )
+
+    print(f"Starting Simple DDPM-based optimization with {n_runs} runs")
+    print(f"Problem: {problem_name}, Variables: {n_variables}, Objectives: {n_objectives}")
+    print(f"Contexts: {n_contexts}, Initial samples per context: {m_samples}")
+
+    for run in range(n_runs):
+        print(f"\n{'=' * 60}")
+        print(f"Starting run {run + 1}/{n_runs}")
+        print(f"{'=' * 60}")
+
+        # Initialize the simplified DDPM optimizer
+        optimizer = SimpleDiffusionContextualMOBO(
+            objective_func=obj_func,
+            model_type=model_type,
+            problem_name=problem_name,
+            # Simple DDPM specific parameters
+            diffusion_training_frequency=3,  # Train every 3 iterations
+            diffusion_min_data_points=8,  # Minimum data for training
+            diffusion_timesteps=1000,  # DDPM timesteps
+            diffusion_epochs=50,  # Training epochs
+            diffusion_batch_size=32,  # Batch size for training
+            diffusion_hidden_dim=128,  # Hidden dimension of MLP
+            diffusion_num_layers=4,  # Number of MLP layers
+            use_noise=False,  # Whether to add noise to training
+            scalar_type="HV",  # Scalarization type
+            use_global_reference=True  # Use global reference point
+        )
+
+        # Generate initial points
+        n_initial_points = m_samples
+        X_init = torch.zeros(n_initial_points * n_contexts, obj_func.input_dim + obj_func.context_dim)
+
+        print(f"Generating initial points...")
+        for i in range(n_contexts):
+            start_idx = i * n_initial_points
+            end_idx = (i + 1) * n_initial_points
+
+            # Load or generate initial points for this context
+            init_file = "data/init_points_context_{}_{}_{}.pth".format(i, obj_func.input_dim, n_initial_points)
+
+            if os.path.exists(init_file):
+                init_points = torch.load(init_file)
+            else:
+                # Generate using Latin Hypercube Sampling if file doesn't exist
+                sampler = qmc.LatinHypercube(d=obj_func.input_dim)
+                base_sampler = sampler.random(n=n_initial_points)
+                init_points = torch.tensor(base_sampler, dtype=torch.float32)
+                # Save for future use
+                os.makedirs("data", exist_ok=True)
+                torch.save(init_points, init_file)
+
+            X_init[start_idx:end_idx, :obj_func.input_dim] = init_points
+            X_init[start_idx:end_idx, obj_func.input_dim:] = contexts[i].repeat(n_initial_points, 1)
+
+        # Evaluate initial points
+        print(f"Evaluating initial points...")
+        Y_init = obj_func.evaluate(X_init)
+
+        print(f"Initial data: {X_init.shape[0]} points")
+        print(f"Starting optimization with {n_iter} iterations...")
+
+        # Run optimization
+        X_opt, Y_opt = optimizer.optimize(X_init, Y_init, contexts, n_iter=n_iter, beta=temp_beta, run=run)
+
+        # Store results for this run
+        run_data = {}
+        print(f"\nFinal Results for Run {run + 1}:")
+        print(f"{'-' * 40}")
+
+        for i, context in enumerate(contexts):
+            context_key = tuple(context.numpy())
+            if context_key in optimizer.context_pareto_fronts:
+                run_data[context_key] = {
+                    'pareto_set_history': optimizer.context_pareto_sets[context_key],
+                    'pareto_front_history': optimizer.context_pareto_fronts[context_key],
+                    'hv_history': optimizer.context_hv[context_key]
+                }
+                final_hv = optimizer.context_hv[context_key][-1]
+                n_pareto_points = len(optimizer.context_pareto_fronts[context_key][-1])
+                print(f"Context {i}: HV = {final_hv:.4f}, Pareto points = {n_pareto_points}")
+            else:
+                print(f"Context {i}: No Pareto front found")
+
+        # Create complete data structure with simple DDPM model
+        complete_data = {
+            'optimization_history': run_data,
+            'training_data': {
+                'X_all': optimizer.X_train.clone(),
+                'Y_all': optimizer.Y_train.clone(),
+                'contexts': contexts.clone()
+            },
+            'trained_simple_ddpm_model': None,
+            'simple_ddpm_config': None,
+            'elite_solutions': {
+                'diffusion_training_sets': optimizer.diffusion_training_sets,
+                'diffusion_training_contexts': optimizer.diffusion_training_contexts
+            },
+            'hyperparameters': {
+                'diffusion_training_frequency': optimizer.diffusion_training_frequency,
+                'diffusion_timesteps': optimizer.diffusion_timesteps,
+                'diffusion_epochs': optimizer.diffusion_epochs,
+                'diffusion_hidden_dim': optimizer.diffusion_hidden_dim,
+                'diffusion_num_layers': optimizer.diffusion_num_layers,
+                'model_type': model_type,
+                'beta': temp_beta
+            }
+        }
+
+        # Save trained simple DDPM model
+        if optimizer.diffusion_model is not None:
+            complete_data['trained_simple_ddpm_model'] = optimizer.diffusion_model.model.state_dict()
+            complete_data['simple_ddmp_config'] = {
+                'input_dim': optimizer.diffusion_model.input_dim,
+                'conditioning_dim': optimizer.diffusion_model.conditioning_dim,
+                'timesteps': optimizer.diffusion_model.timesteps,
+                'hidden_dim': optimizer.diffusion_model.hidden_dim,
+                'num_layers': optimizer.diffusion_model.num_layers,
+                'architecture': 'SimpleDDPM'
+            }
+            print(f"Simple DDPM model trained and saved")
+            print(f"Model details: {optimizer.diffusion_model.conditioning_dim} conditioning dims, "
+                  f"{optimizer.diffusion_model.hidden_dim} hidden dims, "
+                  f"{optimizer.diffusion_model.num_layers} layers")
+        else:
+            print("Warning: No simple DDPM model was trained during optimization")
+
+        # Save individual run data
+        run_save_path = f'result/{problem_name}/SimpleDDPM-CMOBO_optimization_history_{timestamp}_run_{run}.pth'
+        torch.save(run_data, run_save_path)
+        print(f"Run {run + 1} data saved to {run_save_path}")
+
+        # Save complete data
+        complete_save_path = f'result/{problem_name}/SimpleDDPM-CMOBO_complete_{timestamp}_run_{run}.pth'
+        torch.save(complete_data, complete_save_path)
+        print(f"Complete simple DDPM data saved to {complete_save_path}")
+
+        # Plot hypervolume history for this run
+        plot_hypervolume_history(run_data, contexts, run, problem_name, timestamp)
+
+        # Plot Pareto fronts for final iteration
+        plot_final_pareto_fronts(run_data, contexts, run, problem_name, timestamp)
+
+        print(f"Run {run + 1} completed successfully!")
+
+    print(f"\n{'=' * 60}")
+    print(f"All {n_runs} runs completed!")
+    print(f"Results saved in: result/{problem_name}/")
+    print(f"{'=' * 60}")
 
 
 

@@ -94,7 +94,8 @@ class ConditionalMLPUNet(nn.Module):
         self.output_proj = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
-            nn.Linear(hidden_dim // 2, input_dim)
+            nn.Linear(hidden_dim // 2, input_dim),
+            nn.Sigmoid()  # Constrains noise predictions to [0,1]
         )
 
     def forward(self, x, t, c):
@@ -266,6 +267,7 @@ class ConditionalDDIM(nn.Module):
 
         # Clamp output to [0, 1] range like VAE
         x = torch.clamp(x, 0, 1)
+        # x = torch.sigmoid(x)
         return x
 
     def forward(self, x, c):
@@ -295,9 +297,9 @@ class ParetoDDIMTrainer:
                  timesteps=1000,
                  hidden_dim=256,
                  num_layers=4,
-                 learning_rate=0.001,
+                 learning_rate=0.01,
                  batch_size=64,
-                 epochs=100,
+                 epochs=50,
                  device=None,
                  trainer_id=None,
                  save_dir='./results',
