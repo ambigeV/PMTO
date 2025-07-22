@@ -21,6 +21,7 @@ from .gen_models import ParetoVAETrainer
 from .conditional_ddim import ParetoDDIMTrainer
 from .util_models import ParetoSetModel, compute_gp_gradients
 import os
+from simple_ddpm_model import SimpleParetoTrainer
 
 
 IF_PLOT = False
@@ -3823,6 +3824,692 @@ class DiffusionContextualMOBO(ContextualMultiObjectiveBayesianOptimization):
 
                     else:
                         # Fall back to traditional acquisition if Diffusion fails
+                        next_x = optimize_scalarized_acquisition_for_context(
+                            models=predictions,
+                            context=context,
+                            x_dim=self.input_dim,
+                            scalarization_func=self.scalarization,
+                            weights=weights,
+                            beta=beta,
+                            x_mean=self.bo_models[0].x_mean,
+                            x_std=self.bo_models[0].x_std
+                        )
+                else:
+                    # Use traditional acquisition optimization
+                    next_x = optimize_scalarized_acquisition_for_context(
+                        models=predictions,
+                        context=context,
+                        x_dim=self.input_dim,
+                        scalarization_func=self.scalarization,
+                        weights=weights,
+                        beta=beta,
+                        x_mean=self.bo_models[0].x_mean,
+                        x_std=self.bo_models[0].x_std
+                    )
+
+                # Evaluate selected point
+                x_c = torch.cat([next_x, context])
+                next_y = self.objective_func.evaluate(x_c.clone().unsqueeze(0))
+
+                if self.USE_NOISE:
+                    next_y_noise = next_y + 0.01 * torch.randn_like(next_y)
+                    next_values_noise.append(next_y_noise)
+
+                next_points.append(x_c)
+                next_values.append(next_y)
+
+            # Update training data
+            next_points = torch.stack(next_points)
+            next_values = torch.stack(next_values)
+
+            if self.USE_NOISE:
+                next_values_noise = torch.stack(next_values_noise)
+                Y_train_noise = torch.cat([Y_train_noise, next_values_noise.squeeze(1)])
+
+            X_train = torch.cat([X_train, next_points])
+            Y_train = torch.cat([Y_train, next_values.detach().squeeze(1)])
+            self.X_train = X_train.clone()
+            self.Y_train = Y_train.clone()
+
+            # Update Pareto fronts for all contexts
+            for context_id, context in enumerate(contexts):
+                context_mask = torch.all(X_train[:, self.input_dim:] == context, dim=1)
+                context_key = tuple(context.numpy())
+                if torch.any(context_mask):
+                    Y_context = Y_train[context_mask]
+                    X_context = X_train[context_mask][:, :self.input_dim]
+                    self._update_pareto_front_for_context(X_context, Y_context, context)
+
+                # Log metrics
+                if IF_LOG:
+                    metrics = {
+                        'hypervolume': self.context_hv[context_key][-1],
+                        'pareto_points': len(self.context_pareto_fronts[context_key][-1])
+                    }
+                    self.monitors[context_id].log_optimization_metrics(metrics, iteration)
+
+            if iteration % 5 == 0:
+                print(f'Iteration {iteration}/{n_iter}')
+                for context in contexts:
+                    context_key = tuple(context.numpy())
+                    print(f'Context {context_key}:')
+                    print(f'  Hypervolume: {self.context_hv[context_key][-1]:.3f}')
+                    print(f'  Pareto front size: {len(self.context_pareto_fronts[context_key][-1])}')
+
+        return X_train, Y_train
+
+
+class SimpleDiffusionContextualMOBO(ContextualMultiObjectiveBayesianOptimization):
+    """
+    Simplified Diffusion-enhanced Contextual Multi-Objective Bayesian Optimization.
+    Uses simple DDPM instead of DDIM for better stability and simplicity.
+    """
+
+    def __init__(
+            self,
+            objective_func,
+            reference_point: torch.Tensor = None,
+            inducing_points: Optional[torch.Tensor] = None,
+            train_steps: int = 200,
+            model_type: str = 'ExactGP',
+            optimizer_type: str = 'adam',
+            rho: float = 0.001,
+            # Simple DDPM-specific parameters
+            diffusion_training_frequency: int = 3,
+            diffusion_min_data_points: int = 8,
+            diffusion_timesteps: int = 1000,
+            diffusion_epochs: int = 50,
+            diffusion_batch_size: int = 32,
+            diffusion_hidden_dim: int = 128,
+            diffusion_num_layers: int = 4,
+            use_noise: bool = False,
+            scalar_type: str = "HV",
+            use_global_reference: bool = True,
+            problem_name: str = None
+    ):
+        # Initialize the parent class
+        super().__init__(
+            objective_func=objective_func,
+            reference_point=reference_point,
+            inducing_points=inducing_points,
+            train_steps=train_steps,
+            model_type=model_type,
+            optimizer_type=optimizer_type,
+            rho=rho
+        )
+
+        # Simple DDPM-specific parameters
+        self.diffusion_training_frequency = diffusion_training_frequency
+        self.diffusion_min_data_points = diffusion_min_data_points
+        self.diffusion_timesteps = diffusion_timesteps
+        self.diffusion_epochs = diffusion_epochs
+        self.diffusion_batch_size = diffusion_batch_size
+        self.diffusion_hidden_dim = diffusion_hidden_dim
+        self.diffusion_num_layers = diffusion_num_layers
+        self.diffusion_model = None
+        self.problem_name = problem_name
+
+        # Settings
+        self.USE_NOISE = use_noise
+        self.SCALAR = scalar_type
+        self.IF_GLOBAL = use_global_reference
+
+        # Structure for diffusion training data (same as your original approach)
+        self.diffusion_training_sets = {}
+        self.diffusion_training_fronts = {}
+        self.diffusion_training_contexts = {}
+
+        # Store all available training data
+        self.X_train = None
+        self.Y_train = None
+
+    def _generate_uniform_weights(self, num_uniform_weights: int, output_dim: int) -> torch.Tensor:
+        """Generate uniformly distributed weight vectors using Dirichlet distribution."""
+        import scipy.stats as stats
+
+        if output_dim == 1:
+            return torch.ones(num_uniform_weights, 1)
+
+        # Use symmetric Dirichlet distribution with alpha=1 for uniform distribution on simplex
+        alpha = [1.0] * output_dim
+        dirichlet_samples = stats.dirichlet.rvs(alpha, size=num_uniform_weights)
+        weights = torch.tensor(dirichlet_samples, dtype=torch.float32)
+
+        return weights
+
+    def _update_pareto_front_for_context(self, X: torch.Tensor, Y: torch.Tensor, context: torch.Tensor):
+        """
+        Override to collect rank-1 and rank-2 solutions for simple DDPM training.
+        """
+        context_key = tuple(context.numpy())
+
+        # Create scalarization function based on this weight
+        if self.SCALAR == "AT":
+            scalarization = AugmentedTchebycheff(
+                reference_point=self.global_reference_point,
+                rho=self.rho
+            )
+        else:
+            scalarization = HypervolumeScalarization(
+                nadir_point=self.global_nadir_point,
+                exponent=self.output_dim
+            )
+
+        # Convert to numpy for pymoo
+        Y_np = Y.numpy()
+
+        # Get non-dominated sorting with multiple fronts
+        fronts = NonDominatedSorting().do(Y_np)
+
+        # Initialize regular tracking structures (same as parent class)
+        if context_key not in self.context_hv:
+            self.context_hv[context_key] = []
+        if context_key not in self.context_pareto_fronts:
+            self.context_pareto_fronts[context_key] = []
+        if context_key not in self.context_pareto_sets:
+            self.context_pareto_sets[context_key] = []
+
+        # Initialize diffusion training data structures
+        if context_key not in self.diffusion_training_sets:
+            self.diffusion_training_sets[context_key] = []
+        if context_key not in self.diffusion_training_fronts:
+            self.diffusion_training_fronts[context_key] = []
+        if context_key not in self.diffusion_training_contexts:
+            self.diffusion_training_contexts[context_key] = []
+
+        # Update regular Pareto front tracking (rank-1 only)
+        pareto_front = Y[fronts[0]]
+        pareto_set = X[fronts[0]]
+        self.context_pareto_fronts[context_key].append(pareto_front)
+        self.context_pareto_sets[context_key].append(pareto_set)
+
+        # Calculate hypervolume using rank-1 solutions only
+        hv = self.hv.do(pareto_front.numpy())
+        self.context_hv[context_key].append(hv)
+
+        # Collect solutions for diffusion training (rank-1 and rank-2)
+        diffusion_sets = []
+        diffusion_fronts = []
+
+        # Include rank-1 solutions
+        diffusion_sets.append(pareto_set)
+        diffusion_fronts.append(pareto_front)
+
+        # Add rank-2 solutions if available
+        if len(fronts) > 1 and len(fronts[1]) > 0:
+            rank2_front = Y[fronts[1]]
+            rank2_set = X[fronts[1]]
+            diffusion_sets.append(rank2_set)
+            diffusion_fronts.append(rank2_front)
+
+        # Combine all solutions
+        combined_set = torch.cat(diffusion_sets) if len(diffusion_sets) > 0 else torch.tensor([])
+        combined_front = torch.cat(diffusion_fronts) if len(diffusion_fronts) > 0 else torch.tensor([])
+
+        # Only proceed if we have data to work with
+        if len(combined_set) > 0:
+            # Compute weight vectors for each solution
+            reference_point = self.global_reference_point
+            top_p = 0.1
+            context_mask = torch.all(self.X_train[:, self.input_dim:] == context, dim=1)
+            combined_contexts = []
+            augmented_diffusion_sets = []
+            augmented_diffusion_fronts = []
+            augmented_contexts = []
+
+            all_X_context = self.X_train[context_mask][:, :self.input_dim]
+            all_Y_context = self.Y_train[context_mask]
+            num_uniform_weights = combined_front.shape[0]
+            uniform_weights = self._generate_uniform_weights(num_uniform_weights ** (self.output_dim - 1),
+                                                             self.output_dim)
+
+            # Process uniform weights
+            for weight in uniform_weights:
+                scalarized_values = scalarization(all_Y_context, weight)
+                num_to_select = max(1, int(len(scalarized_values) * top_p))
+                _, top_indices = torch.topk(scalarized_values, num_to_select, largest=False)
+
+                # Combine context and weight for conditioning (simplified concatenation)
+                combined_context = torch.cat([context[1:], weight])
+                combined_contexts.append(combined_context)
+
+                # Select solutions and replicate contexts
+                selected_X = all_X_context[top_indices]
+                selected_Y = all_Y_context[top_indices]
+                replicated_context = combined_context.unsqueeze(0).expand(num_to_select, -1)
+
+                augmented_diffusion_sets.append(selected_X)
+                augmented_diffusion_fronts.append(selected_Y)
+                augmented_contexts.append(replicated_context)
+
+            # Process combined front solutions
+            for y_value in combined_front:
+                weight = self.compute_weight_from_solution(y_value, reference_point, context_key)
+
+                scalarized_values = scalarization(all_Y_context, weight)
+                num_to_select = max(1, int(len(scalarized_values) * top_p))
+                _, top_indices = torch.topk(scalarized_values, num_to_select, largest=False)
+
+                # Combine context and weight for conditioning
+                combined_context = torch.cat([context[1:], weight])
+                combined_contexts.append(combined_context)
+
+                # Select solutions and replicate contexts
+                selected_X = all_X_context[top_indices]
+                selected_Y = all_Y_context[top_indices]
+                replicated_context = combined_context.unsqueeze(0).expand(num_to_select, -1)
+
+                augmented_diffusion_sets.append(selected_X)
+                augmented_diffusion_fronts.append(selected_Y)
+                augmented_contexts.append(replicated_context)
+
+            if len(augmented_diffusion_sets) > 0:
+                augmented_diffusion_sets = torch.cat(augmented_diffusion_sets, dim=0)
+                augmented_diffusion_fronts = torch.cat(augmented_diffusion_fronts, dim=0)
+                augmented_contexts = torch.cat(augmented_contexts, dim=0)
+
+                # Store for diffusion training
+                self.diffusion_training_sets[context_key].append(augmented_diffusion_sets)
+                self.diffusion_training_fronts[context_key].append(augmented_diffusion_fronts)
+                self.diffusion_training_contexts[context_key].append(augmented_contexts)
+
+    def compute_weight_from_solution(self, y, reference_point, context_key):
+        """Compute weight vector from objective values using the scalarization method."""
+        if self.SCALAR == "AT":
+            # Augmented Tchebycheff scalarization
+            diff = y - reference_point
+            diff = torch.clamp(diff, min=1e-6)
+            weights = 1.0 / diff
+        else:
+            # Hypervolume scalarization
+            nadir_point = self.global_nadir_point
+            diff = nadir_point - y
+            diff = torch.clamp(diff, min=1e-6)
+            weights = diff
+
+        # Normalize weights to sum to 1
+        weights_sum = torch.sum(weights)
+        if weights_sum > 1e-10:
+            weights = weights / weights_sum
+        else:
+            weights = torch.ones_like(y) / len(y)
+
+        return weights
+
+    def initialize_or_update_diffusion(self, iteration, full_training=False):
+        """
+        Initialize a new simple DDPM model or update the existing one.
+        """
+        # Collect training data from all contexts
+        all_X = []
+        all_contexts = []
+
+        # Create a TensorBoard writer
+        log_dir = os.path.join(f"./log_tier/{self.base_dir_name}_0.1", f"SimpleDDPM_logs_{iteration}")
+        writer = SummaryWriter(log_dir)
+
+        for context_key in self.diffusion_training_sets.keys():
+            if len(self.diffusion_training_sets[context_key]) > 0:
+                # Get the latest data
+                latest_set = self.diffusion_training_sets[context_key][-1]
+                latest_contexts = self.diffusion_training_contexts[context_key][-1]
+
+                all_X.append(latest_set)
+                all_contexts.append(latest_contexts)
+
+        if len(all_X) == 0:
+            print("No training data available for simple DDPM model")
+            return
+
+        # Convert lists to tensors
+        X_train = torch.cat(all_X)
+        contexts_train = torch.cat(all_contexts)
+
+        # Create a custom callback for the simple DDPM trainer
+        class TensorBoardCallback:
+            def __init__(self, writer, prefix=""):
+                self.writer = writer
+                self.prefix = prefix
+                self.epoch = 0
+
+            def after_epoch(self, epoch, logs):
+                self.epoch = epoch
+                # Log training metrics
+                for key, value in logs.items():
+                    if isinstance(value, list) and len(value) > 0:
+                        self.writer.add_scalar(f"{self.prefix}/{key}", value[-1], epoch)
+                    else:
+                        self.writer.add_scalar(f"{self.prefix}/{key}", value, epoch)
+
+            def after_batch(self, batch_idx, logs):
+                # Log batch-level metrics
+                for key, value in logs.items():
+                    self.writer.add_scalar(f"{self.prefix}/batch_{key}", value,
+                                           self.epoch * batch_idx)
+
+        # Instantiate callback
+        tensorboard_callback = TensorBoardCallback(writer, prefix="SimpleDDPM_training")
+
+        if len(X_train) < self.diffusion_min_data_points:
+            print(
+                f"Not enough data points for simple DDPM training ({len(X_train)} < {self.diffusion_min_data_points})")
+            return
+
+        # Calculate conditioning dimension
+        conditioning_dim = contexts_train.shape[1]  # Context + weights combined
+
+        # Initialize new simple DDPM model if needed
+        if self.diffusion_model is None:
+            self.diffusion_model = SimpleParetoTrainer(
+                input_dim=self.input_dim,
+                conditioning_dim=conditioning_dim,
+                timesteps=self.diffusion_timesteps,
+                hidden_dim=self.diffusion_hidden_dim,
+                num_layers=self.diffusion_num_layers,
+                epochs=self.diffusion_epochs,
+                batch_size=min(self.diffusion_batch_size, len(X_train)),
+                trainer_id=f"CMOBO_SimpleDDPM_{iteration}"
+            )
+            full_training = True  # Always do full training for new model
+
+        if full_training:
+            # Full training
+            print(f"Simple DDPM model fully trained at iteration {iteration} with {len(X_train)} points")
+            self.diffusion_model.train(X=X_train, contexts=contexts_train, callback=tensorboard_callback)
+        else:
+            # Incremental training
+            original_epochs = self.diffusion_model.epochs
+            self.diffusion_model.epochs = max(30,
+                                              int(original_epochs * 0.3))  # Use fewer epochs for incremental updates
+            self.diffusion_model.epochs = original_epochs  # Restore original setting
+            self.diffusion_model.train(X=X_train, contexts=contexts_train, callback=tensorboard_callback)
+            print(f"Simple DDPM model incrementally updated at iteration {iteration} with {len(X_train)} points")
+
+        writer.close()
+
+    def generate_diffusion_candidates(self, context, weight_vector, num_samples=500):
+        """
+        Generate candidate solutions using simple DDPM sampling.
+
+        Args:
+            context: Context vector
+            weight_vector: Current weight vector
+            num_samples: Number of samples to generate
+
+        Returns:
+            Tensor of candidate solutions and their full inputs with context
+        """
+        if self.diffusion_model is None:
+            return None, None
+
+        # Combine context and weight vector (simplified concatenation)
+        combined_context = torch.cat([context[1:], weight_vector])
+
+        # Create batch of identical contexts
+        context_batch = combined_context.unsqueeze(0).expand(num_samples, -1)
+
+        # Generate solutions using simple DDPM sampling
+        candidates = torch.from_numpy(
+            self.diffusion_model.generate_solutions(
+                contexts=context_batch.cpu().numpy(),
+                num_samples=num_samples
+            )
+        ).float()
+
+        # Prepare full inputs including context for acquisition function evaluation
+        full_candidates = []
+        for candidate in candidates:
+            full_candidate = torch.cat([candidate, context])
+            full_candidates.append(full_candidate)
+
+        full_candidates = torch.stack(full_candidates)
+
+        return candidates.detach(), full_candidates.detach()
+
+    def optimize(
+            self,
+            X_train: torch.Tensor,
+            Y_train: torch.Tensor,
+            contexts: torch.Tensor,
+            n_iter: int = 50,
+            beta: float = 1.0,
+            run: int = 0,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Override the optimize method to incorporate simple DDPM capabilities.
+        """
+        self.contexts = contexts
+        self.base_beta = beta
+        self.X_train = X_train.clone()
+        self.Y_train = Y_train.clone()
+
+        n_contexts = contexts.shape[0]
+        self.base_dir_name = f"SimpleDiffusion_CMOBO_{self.problem_name}_{self.input_dim}_{self.output_dim}_{self.model_type}_{self.diffusion_training_frequency}_{run}_0.1"
+        if IF_LOG:
+            self.initialize_monitors(n_contexts, self.base_dir_name)
+            log_sampled_points = self._sample_points(30000, self.input_dim, 0)
+
+        if self.USE_NOISE:
+            Y_train_noise = Y_train + 0.01 * torch.randn_like(Y_train)
+        else:
+            Y_train_noise = None
+
+        # Initialize global reference and nadir points
+        self._update_global_reference_and_nadir_points(Y_train)
+
+        # Initialize tracking for each context
+        for context in contexts:
+            context_mask = torch.all(X_train[:, self.input_dim:] == context, dim=1)
+            if torch.any(context_mask):
+                Y_context = Y_train[context_mask]
+                X_context = X_train[context_mask][:, :self.input_dim]
+                self._update_pareto_front_for_context(X_context, Y_context, context)
+
+        for iteration in range(n_iter):
+            self._update_beta(iteration)
+            # Generate random weights
+            weights = self._generate_weight_vector(self.output_dim)
+
+            # Train models for each objective (same as original implementation)
+            predictions = []
+            if iteration % 1 == 0:
+                for i, bo_model in enumerate(self.bo_models):
+                    if self.USE_NOISE:
+                        X_norm, y_norm = bo_model.normalize_data(
+                            X_train.clone(),
+                            Y_train_noise[:, i].clone()
+                        )
+                    else:
+                        X_norm, y_norm = bo_model.normalize_data(
+                            X_train.clone(),
+                            Y_train[:, i].clone()
+                        )
+
+                    if iteration > 60:
+                        model = bo_model.build_model(X_norm, y_norm, True)
+                    else:
+                        model = bo_model.build_model(X_norm, y_norm, False)
+                    model.train()
+                    bo_model.likelihood.train()
+
+                    # Training loop (same as original)
+                    optimizer = torch.optim.Adam(model.parameters(),
+                                                 lr=0.1) if bo_model.optimizer_type == 'adam' else FullBatchLBFGS(
+                        model.parameters())
+
+                    scheduler = torch.optim.lr_scheduler.MultiStepLR(
+                        optimizer,
+                        milestones=[int(self.new_train_steps * 0.5), int(self.new_train_steps * 0.75)],
+                        gamma=0.1
+                    )
+
+                    # Define likelihood
+                    if bo_model.model_type == 'SVGP':
+                        mll = gpytorch.mlls.VariationalELBO(
+                            bo_model.likelihood,
+                            model,
+                            num_data=y_norm.size(0)
+                        )
+                    else:
+                        mll = gpytorch.mlls.ExactMarginalLogLikelihood(
+                            bo_model.likelihood,
+                            model
+                        )
+
+                    # Training Loop
+                    if bo_model.optimizer_type == 'lbfgs':
+                        def closure():
+                            optimizer.zero_grad()
+                            output = model(X_norm)
+                            loss = -mll(output, y_norm)
+                            return loss
+
+                        prev_loss = float('inf')
+                        loss = closure()
+                        loss.backward()
+                        for dummy_range in range(60):
+                            options = {'closure': closure, 'current_loss': loss, 'max_ls': 10}
+                            loss, _, lr, _, F_eval, G_eval, _, _ = optimizer.step(options)
+                    else:
+                        prev_loss = float('inf')
+                        for _ in range(bo_model.train_steps):
+                            optimizer.zero_grad()
+                            output = model(X_norm)
+                            loss = -mll(output, y_norm)
+                            loss.backward()
+                            optimizer.step()
+                            scheduler.step()
+                            prev_loss = loss.item()
+
+                            if _ % 100 == 0:
+                                print(f"Current loss is {prev_loss}")
+
+                    bo_model.model = model
+                    predictions.append({"model": model, "likelihood": bo_model.likelihood})
+
+                    # Log model parameters and predictions
+                    if IF_LOG:
+                        for context_id, context in enumerate(contexts):
+                            cur_monitor = self.monitors[context_id]
+                            cur_monitor.log_kernel_params(model, i + 1, iteration)
+                            temp_log_sampled_points = torch.cat([log_sampled_points,
+                                                                 context.unsqueeze(0).expand(
+                                                                     log_sampled_points.shape[0],
+                                                                     -1)],
+                                                                dim=1)
+                            norm_log_sampled_points = (temp_log_sampled_points - self.bo_models[0].x_mean) / \
+                                                      self.bo_models[
+                                                          0].x_std
+                            Y_sampled_points = self.objective_func.evaluate(temp_log_sampled_points)[:, i]
+                            norm_Y_sampled_points = (Y_sampled_points - self.bo_models[i].y_mean) / self.bo_models[
+                                i].y_std
+                            cur_monitor.log_predictions(model,
+                                                        bo_model.likelihood,
+                                                        norm_log_sampled_points,
+                                                        norm_Y_sampled_points,
+                                                        iteration,
+                                                        i + 1)
+
+                self._update_global_reference_and_nadir_points(Y_train)
+
+                for context_id, context in enumerate(contexts):
+                    context_mask = torch.all(X_train[:, self.input_dim:] == context, dim=1)
+                    if torch.any(context_mask):
+                        if self.USE_NOISE:
+                            Y_context = Y_train_noise[context_mask]
+                        else:
+                            Y_context = Y_train[context_mask]
+                        self._update_context_reference_and_nadir_points(context, Y_context)
+
+            if len(predictions) > 0:
+                self.predictions = predictions
+            else:
+                predictions = self.predictions
+
+            # Log acquisition function values
+            for context_id, context in enumerate(contexts):
+                if IF_LOG:
+                    cur_monitor = self.monitors[context_id]
+                    temp_log_sampled_points = torch.cat([log_sampled_points,
+                                                         context.unsqueeze(0).expand(log_sampled_points.shape[0], -1)],
+                                                        dim=1)
+                    norm_log_sampled_points = (temp_log_sampled_points - self.bo_models[0].x_mean) / self.bo_models[
+                        0].x_std
+                    acq_values = self._compute_acquisition_batch(predictions, norm_log_sampled_points, self.beta,
+                                                                 weights,
+                                                                 context)
+                    cur_monitor.log_acquisition_values(acq_values, iteration)
+
+            # Train or update simple DDPM model if it's time
+            if iteration % self.diffusion_training_frequency == 0:
+                # Do full training periodically
+                full_training = True
+                self.initialize_or_update_diffusion(iteration, full_training)
+
+            # Optimize for each context
+            next_points = []
+            next_values = []
+            next_values_noise = []
+
+            for context in contexts:
+                context_key = tuple(context.numpy())
+
+                # Set up scalarization function
+                if self.SCALAR == "AT":
+                    if self.IF_GLOBAL:
+                        self.scalarization = AugmentedTchebycheff(
+                            reference_point=self.global_reference_point,
+                            rho=self.rho
+                        )
+                    else:
+                        self.scalarization = AugmentedTchebycheff(
+                            reference_point=self.current_reference_points[context_key],
+                            rho=self.rho
+                        )
+                else:
+                    if self.IF_GLOBAL:
+                        self.scalarization = HypervolumeScalarization(
+                            nadir_point=self.global_nadir_point,
+                            exponent=self.output_dim
+                        )
+                    else:
+                        self.scalarization = HypervolumeScalarization(
+                            nadir_point=self.current_nadir_points[context_key],
+                            exponent=self.output_dim
+                        )
+
+                # Decide whether to use simple DDPM-generated candidates or traditional acquisition
+                use_diffusion = (self.diffusion_model is not None and
+                                 iteration >= self.diffusion_training_frequency and
+                                 iteration % self.diffusion_training_frequency == 0)
+
+                if use_diffusion:
+                    # Generate candidates using simple DDPM sampling
+                    diffusion_candidates, full_candidates = self.generate_diffusion_candidates(
+                        context=context,
+                        weight_vector=weights,
+                        num_samples=30000
+                    )
+
+                    if diffusion_candidates is not None and len(diffusion_candidates) > 0:
+                        # Normalize for GP prediction in batch
+                        norm_candidates = (full_candidates - self.bo_models[0].x_mean) / self.bo_models[0].x_std
+
+                        # Evaluate acquisition function in batch
+                        acq_values = self._compute_acquisition_batch(
+                            predictions,
+                            norm_candidates,
+                            self.beta,
+                            weights,
+                            context
+                        )
+
+                        # Find best candidate
+                        best_idx = torch.argmin(torch.tensor(acq_values))
+                        next_x = diffusion_candidates[best_idx]
+
+                    else:
+                        # Fall back to traditional acquisition if simple DDPM fails
                         next_x = optimize_scalarized_acquisition_for_context(
                             models=predictions,
                             context=context,

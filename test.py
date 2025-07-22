@@ -2,7 +2,8 @@ from PMTO import BayesianOptimization, ObjectiveFunction, \
     MultiObjectiveFunction, MultiObjectiveBayesianOptimization, \
     ContextualBayesianOptimization, ContextualMultiObjectiveFunction, \
     ContextualMultiObjectiveBayesianOptimization, PseudoObjectiveFunction, \
-    VAEEnhancedCMOBO, ParEGO, EHVI, PSLMOBO, DiffusionContextualMOBO
+    VAEEnhancedCMOBO, ParEGO, EHVI, PSLMOBO, DiffusionContextualMOBO, \
+    SimpleDiffusionContextualMOBO
 import torch
 import matplotlib.pyplot as plt
 import numpy as np
@@ -1264,7 +1265,7 @@ def simple_ddpm_optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5,
     plot_contexts(contexts)
 
     # Create timestamp for saving results
-    timestamp = "{}_{}_{}_{:.2f}_simple_ddpm_{}_hv_constrain".format(
+    timestamp = "{}_{}_{}_{:.2f}_test_{}_hv_constrain".format(
         problem_name,
         n_variables,
         n_objectives,
@@ -1398,20 +1399,33 @@ def simple_ddpm_optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5,
             print("Warning: No simple DDPM model was trained during optimization")
 
         # Save individual run data
-        run_save_path = f'result/{problem_name}/SimpleDDPM-CMOBO_optimization_history_{timestamp}_run_{run}.pth'
+        run_save_path = f'result/{problem_name}/A_SimpleDDPM-CMOBO_optimization_history_{timestamp}_run_{run}.pth'
         torch.save(run_data, run_save_path)
         print(f"Run {run + 1} data saved to {run_save_path}")
 
         # Save complete data
-        complete_save_path = f'result/{problem_name}/SimpleDDPM-CMOBO_complete_{timestamp}_run_{run}.pth'
+        complete_save_path = f'result/{problem_name}/A_SimpleDDPM-CMOBO_complete_{timestamp}_run_{run}.pth'
         torch.save(complete_data, complete_save_path)
         print(f"Complete simple DDPM data saved to {complete_save_path}")
 
-        # Plot hypervolume history for this run
-        plot_hypervolume_history(run_data, contexts, run, problem_name, timestamp)
-
-        # Plot Pareto fronts for final iteration
-        plot_final_pareto_fronts(run_data, contexts, run, problem_name, timestamp)
+        # Plot hypervolume history for this run (inline style)
+        fig, axes = plt.subplots(4, 4, figsize=(20, 20))
+        fig.suptitle(f'Simple DDPM: Hypervolume History for Each Context (Run {run + 1})', fontsize=16)
+        for i, context in enumerate(contexts):
+            row = i // 4
+            col = i % 4
+            ax = axes[row, col]
+            context_key = tuple(context.numpy())
+            if context_key in run_data:
+                hv_history = run_data[context_key]['hv_history']
+                ax.plot(range(len(hv_history)), hv_history, label=f'Run {run + 1}')
+            ax.set_title(f'Context {i}')
+            ax.set_xlabel('Iteration')
+            ax.set_ylabel('Hypervolume')
+            ax.legend()
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+        plt.savefig(f'result/{problem_name}/A_SimpleDDPM-CMOBO_hypervolume_history_grid_{timestamp}_run_{run}.png')
+        plt.close()
 
         print(f"Run {run + 1} completed successfully!")
 
@@ -1419,7 +1433,6 @@ def simple_ddpm_optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5,
     print(f"All {n_runs} runs completed!")
     print(f"Results saved in: result/{problem_name}/")
     print(f"{'=' * 60}")
-
 
 
 # # Example usage
@@ -1436,6 +1449,7 @@ def simple_ddpm_optimization_loop_test(problem_name='dtlz2', n_runs=1, n_iter=5,
 #     )
 
 context_scale = 2
+
 
 def main():
     args = parse_arguments()
@@ -1620,7 +1634,6 @@ def main():
             m_tasks=args.m_tasks,
             m_samples=args.m_samples,
         )
-
 
 
 if __name__ == "__main__":
